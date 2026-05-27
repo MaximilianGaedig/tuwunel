@@ -117,16 +117,16 @@ pub async fn should_attempt(&self, server: &ServerName) -> ShouldAttempt {
 	}
 }
 
-/// Yields one tuple per populated bucket, ordered by `(server, bucket)`. The
-/// admin/metrics consumer groups adjacent buckets per server to reconstruct
+/// Yields one tuple per populated bucket, ordered by `(server, bucket_start)`.
+/// The admin/metrics consumer groups adjacent rows per server to reconstruct
 /// streak and latest-failure information.
 #[implement(super::Service)]
 pub fn peer_snapshot(
 	&self,
-) -> impl Stream<Item = (&ServerName, u32, Classification)> + Send + '_ {
+) -> impl Stream<Item = (&ServerName, SystemTime, Classification)> + Send + '_ {
 	self.statuses.stream().ignore_err().map(
 		|((server, bucket), value): ((&ServerName, u32), &[u8])| {
-			(server, bucket, classify(value))
+			(server, bucket_start(bucket), classify(value))
 		},
 	)
 }
@@ -135,6 +135,7 @@ pub fn peer_snapshot(
 #[must_use]
 fn current_bucket() -> u32 { u32::try_from(now_secs() / WINDOW_SECS).unwrap_or(u32::MAX) }
 
+/// Wall-clock instant at the start of `bucket`.
 #[inline]
 #[must_use]
 fn bucket_start(bucket: u32) -> SystemTime {

@@ -2,6 +2,7 @@ mod account_data;
 mod appservice;
 mod globals;
 mod oauth;
+mod peer_status;
 mod presence;
 mod pusher;
 mod raw;
@@ -20,11 +21,11 @@ use tuwunel_core::Result;
 
 use self::{
 	account_data::AccountDataCommand, appservice::AppserviceCommand, globals::GlobalsCommand,
-	oauth::OauthCommand, presence::PresenceCommand, pusher::PusherCommand, raw::RawCommand,
-	resolver::ResolverCommand, room_alias::RoomAliasCommand,
-	room_state_cache::RoomStateCacheCommand, room_timeline::RoomTimelineCommand,
-	sending::SendingCommand, short::ShortCommand, storage::StorageCommand, sync::SyncCommand,
-	users::UsersCommand,
+	oauth::OauthCommand, peer_status::PeerStatusCommand, presence::PresenceCommand,
+	pusher::PusherCommand, raw::RawCommand, resolver::ResolverCommand,
+	room_alias::RoomAliasCommand, room_state_cache::RoomStateCacheCommand,
+	room_timeline::RoomTimelineCommand, sending::SendingCommand, short::ShortCommand,
+	storage::StorageCommand, sync::SyncCommand, users::UsersCommand,
 };
 use crate::admin_command_dispatch;
 
@@ -71,6 +72,10 @@ pub(super) enum QueryCommand {
 	/// - resolver service
 	#[command(subcommand)]
 	Resolver(ResolverCommand),
+
+	/// - per-server reachability store on the federation service
+	#[command(subcommand)]
+	PeerStatus(PeerStatusCommand),
 
 	/// - pusher service
 	#[command(subcommand)]
