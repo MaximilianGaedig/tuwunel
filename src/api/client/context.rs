@@ -188,22 +188,43 @@ async fn resolve_base_event(
 	event_id: &EventId,
 	sender_user: &UserId,
 ) -> Result<(RawPduId, PduEvent)> {
-	let base_id = services
-		.timeline
-		.get_pdu_id(event_id)
-		.map_err(|_| err!(Request(NotFound("Event not found."))));
+	let lookup = || {
+		let base_id = services
+			.timeline
+			.get_pdu_id(event_id)
+			.map_err(|_| err!(Request(NotFound("Event not found."))));
 
-	let base_pdu = services
-		.timeline
-		.get_pdu(event_id)
-		.map_err(|_| err!(Request(NotFound("Base event not found."))));
+		let base_pdu = services
+			.timeline
+			.get_pdu(event_id)
+			.map_err(|_| err!(Request(NotFound("Base event not found."))));
 
-	let visible = services
-		.state_accessor
-		.user_can_see_event(sender_user, room_id, event_id)
-		.map(Ok);
+		let visible = services
+			.state_accessor
+			.user_can_see_event(sender_user, room_id, event_id)
+			.map(Ok);
 
-	let (base_id, base_pdu, visible) = try_join3(base_id, base_pdu, visible).await?;
+		try_join3(base_id, base_pdu, visible)
+	};
+
+	let resolve_remote = services
+		.config
+		.fetch_unreceived_contexts_over_federation
+		&& services.config.allow_federation;
+
+	let (base_id, base_pdu, visible) = match lookup().await {
+		| Ok(found) => found,
+		| Err(e) if !resolve_remote => return Err(e),
+		| Err(_) => {
+			services
+				.timeline
+				.fetch_remote_event(room_id, event_id)
+				.await
+				.ok();
+
+			lookup().await?
+		},
+	};
 
 	if base_pdu.room_id != *room_id || base_pdu.event_id != *event_id {
 		return Err!(Request(NotFound("Base event not found.")));

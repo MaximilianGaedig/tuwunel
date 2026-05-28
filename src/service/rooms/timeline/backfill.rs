@@ -26,7 +26,10 @@ use tuwunel_core::{
 use tuwunel_database::Json;
 
 use super::ExtractBody;
-use crate::federation::ShouldAttempt;
+use crate::{
+	federation::ShouldAttempt,
+	fetcher::{Op, Opts},
+};
 
 /// Three candidate buckets, ordered by [`ShouldAttempt`] verdict:
 /// `Yes`, `Deprioritize`, `No`.
@@ -203,6 +206,28 @@ pub async fn backfill_if_required(&self, room_id: &RoomId, from: PduCount) -> Re
 	warn!("No servers could backfill, but backfill was needed in room {room_id}");
 
 	Ok(())
+}
+
+/// Fetch a single event we have not received over federation and persist it via
+/// the backfill path, so a subsequent local lookup resolves it. Checks are off:
+/// `backfill_pdu` performs full signature, hash, and auth validation itself.
+#[implement(super::Service)]
+#[tracing::instrument(skip(self), level = "debug")]
+pub async fn fetch_remote_event(&self, room_id: &RoomId, event_id: &EventId) -> Result {
+	let outcome = self
+		.services
+		.fetcher
+		.fetch(
+			Opts::new(Op::Event, room_id.to_owned())
+				.event_id(event_id.to_owned())
+				.checks(false),
+		)
+		.await?;
+
+	let pdu: Box<RawJsonValue> = serde_json::from_slice(&outcome.bytes)?;
+
+	self.backfill_pdu(room_id, &outcome.origin, pdu)
+		.await
 }
 
 #[implement(super::Service)]

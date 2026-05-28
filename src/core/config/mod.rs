@@ -788,6 +788,22 @@ pub struct Config {
 	#[serde(default = "true_fn")]
 	pub allow_federation: bool,
 
+	/// (EXPERIMENTAL) Resolve the base event of a room context request by
+	/// fetching it from federation when the server never received it.
+	///
+	/// When a client requests
+	/// `/_matrix/client/v3/rooms/{roomId}/context/{eventId}` for an event
+	/// the server does not hold locally, the server fetches it from a room
+	/// peer and persists it before responding, rather than returning a
+	/// 404. This is gated on `allow_federation`; with federation disabled
+	/// it has no effect. Other on-demand federation fetch sites are gated
+	/// separately.
+	///
+	/// reloadable: yes
+	/// default: false
+	#[serde(default)]
+	pub fetch_unreceived_contexts_over_federation: bool,
+
 	/// Sets the default `m.federate` property for newly created rooms when the
 	/// client does not request one. If `allow_federation` is set to false at
 	/// the same this value is set to false it then always overrides the client

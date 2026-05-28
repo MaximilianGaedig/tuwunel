@@ -68,6 +68,20 @@ impl Opts {
 
 	#[must_use]
 	pub fn hint(self, hint: OwnedServerName) -> Self { Self { hint: Some(hint), ..self } }
+
+	/// Toggle every validation gate at once. Callers that re-validate
+	/// downstream pass `false` to fetch raw bytes without rejecting non-V11
+	/// events.
+	#[must_use]
+	pub fn checks(self, enabled: bool) -> Self {
+		Self {
+			check_event_id: enabled,
+			check_conforms: enabled,
+			check_hashes: enabled,
+			check_signature: enabled,
+			..self
+		}
+	}
 }
 
 /// Raw response body plus the server that answered. `bytes` is ref-counted so
