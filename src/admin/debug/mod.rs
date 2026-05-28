@@ -4,6 +4,7 @@ mod database_files;
 mod database_stats;
 mod dump_pdus;
 mod echo;
+mod event_fetcher;
 mod first_pdu_in_room;
 mod force_device_list_updates;
 mod force_set_room_state_from_server;
@@ -39,7 +40,7 @@ use ruma::{OwnedEventId, OwnedRoomId, OwnedRoomOrAliasId, OwnedServerName};
 use tuwunel_core::Result;
 use tuwunel_service::rooms::short::ShortRoomId;
 
-use self::tester::TesterCommand;
+use self::{event_fetcher::EventFetcherCommand, tester::TesterCommand};
 use crate::admin_command_dispatch;
 
 #[admin_command_dispatch]
@@ -305,6 +306,10 @@ pub(super) enum DebugCommand {
 	DumpPdus {
 		dir: String,
 	},
+
+	/// - Drive the federation event-fetcher service directly (diagnostic)
+	#[command(subcommand)]
+	EventFetcher(EventFetcherCommand),
 
 	/// - Developer test stubs
 	#[command(subcommand)]

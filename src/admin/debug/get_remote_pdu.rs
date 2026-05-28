@@ -1,5 +1,8 @@
 use futures::FutureExt;
-use ruma::{CanonicalJsonObject, OwnedEventId, OwnedServerName};
+use ruma::{
+	CanonicalJsonObject, OwnedEventId, OwnedServerName,
+	api::federation::event::get_event::v1::Request as EventRequest,
+};
 use tuwunel_core::{Err, Result, err, info, trace, warn};
 
 use crate::admin_command;
@@ -21,12 +24,12 @@ pub(super) async fn get_remote_pdu(
 		);
 	}
 
+	// Direct fetch, not the fetcher service: Opts needs a room_id this command
+	// only learns after parsing the response.
 	let response = self
 		.services
 		.federation
-		.execute(&server, ruma::api::federation::event::get_event::v1::Request {
-			event_id: event_id.clone(),
-		})
+		.execute(&server, EventRequest { event_id: event_id.clone() })
 		.await
 		.map_err(|e| {
 			err!("Remote server did not have PDU or failed sending request to remote server: {e}")
