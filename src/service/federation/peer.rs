@@ -1,9 +1,13 @@
 //! Per-server reachability store backed by the `servername_status` CF.
 //!
-//! Bucket key layout: `servername || u32_be(now.as_secs() / WINDOW)`. The
+//! Bucket key layout: `servername || u32_be(now.as_secs() / window_secs)`. The
 //! one-byte value is the [`Classification`]. Bursts within the same window
 //! collide on the same key, which is a correct collision (the window is the
 //! coalescing quantum). The storage layout is the batch.
+//!
+//! `window_secs` is sourced from `sender_timeout` at service build time so the
+//! peer-status curve does not drift from the sender's existing quadratic
+//! backoff when both observe the same peer.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -14,19 +18,8 @@ use tuwunel_core::{
 	utils::{stream::TryIgnore, time::now_secs},
 };
 
-/// Width of one bucket on the wall-clock. Matches `sender_timeout`'s default
-/// and the `MIN_BACKOFF` quantum so the streak count walking back across
-/// adjacent buckets equals `consecutive_failures` directly.
-const WINDOW_SECS: u64 = 30;
-const WINDOW: Duration = Duration::from_secs(WINDOW_SECS);
-
 /// Backoff ceiling, matching `sender_retry_backoff_limit`'s 24h default.
-const MAX_BACKOFF: Duration = Duration::from_hours(24);
-
-/// Walk-back cap. `ceil(sqrt(MAX_BACKOFF / WINDOW)) = ceil(sqrt(2880)) = 54`
-/// is the streak length at which the quadratic curve `WINDOW * n²` saturates
-/// against `MAX_BACKOFF`. Going further would not change the verdict.
-const N_MAX: u32 = 54;
+pub(super) const MAX_BACKOFF: Duration = Duration::from_hours(24);
 
 /// Permanence classification supplied alongside a failure.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -75,19 +68,19 @@ pub enum ShouldAttempt {
 
 #[implement(super::Service)]
 pub fn record_success(&self, server: &ServerName) {
-	self.statuses.del((server, current_bucket()));
+	self.statuses.del((server, self.current_bucket()));
 }
 
 #[implement(super::Service)]
 pub fn record_failure(&self, server: &ServerName, classification: Classification) {
 	self.statuses
-		.put_raw((server, current_bucket()), [u8::from(classification)]);
+		.put_raw((server, self.current_bucket()), [u8::from(classification)]);
 }
 
 #[implement(super::Service)]
 #[tracing::instrument(skip(self), fields(%server), level = "trace")]
 pub async fn should_attempt(&self, server: &ServerName) -> ShouldAttempt {
-	let now_bucket = current_bucket();
+	let now_bucket = self.current_bucket();
 
 	let Ok(handle) = self.statuses.qry(&(server, now_bucket)).await else {
 		return ShouldAttempt::Yes;
@@ -95,7 +88,8 @@ pub async fn should_attempt(&self, server: &ServerName) -> ShouldAttempt {
 
 	if matches!(classify(handle.as_ref()), Classification::Permanent) {
 		return ShouldAttempt::No {
-			earliest_retry: bucket_start(now_bucket)
+			earliest_retry: self
+				.bucket_start(now_bucket)
 				.checked_add(MAX_BACKOFF)
 				.unwrap_or_else(SystemTime::now),
 		};
@@ -104,7 +98,7 @@ pub async fn should_attempt(&self, server: &ServerName) -> ShouldAttempt {
 	// streak walks back until the first gap; async `contains` predicate
 	// forces an imperative loop rather than `take_while`.
 	let mut streak: u32 = 1;
-	while streak < N_MAX {
+	while streak < self.n_max {
 		let prior = now_bucket.saturating_sub(streak);
 		if !self.statuses.contains(&(server, prior)).await {
 			break;
@@ -113,7 +107,7 @@ pub async fn should_attempt(&self, server: &ServerName) -> ShouldAttempt {
 	}
 
 	ShouldAttempt::No {
-		earliest_retry: earliest_retry(now_bucket, streak),
+		earliest_retry: self.earliest_retry(now_bucket, streak),
 	}
 }
 
@@ -125,36 +119,46 @@ pub fn peer_snapshot(
 	&self,
 ) -> impl Stream<Item = (&ServerName, SystemTime, Classification)> + Send + '_ {
 	self.statuses.stream().ignore_err().map(
-		|((server, bucket), value): ((&ServerName, u32), &[u8])| {
-			(server, bucket_start(bucket), classify(value))
+		move |((server, bucket), value): ((&ServerName, u32), &[u8])| {
+			(server, self.bucket_start(bucket), classify(value))
 		},
 	)
 }
 
+#[implement(super::Service)]
 #[inline]
 #[must_use]
-fn current_bucket() -> u32 { u32::try_from(now_secs() / WINDOW_SECS).unwrap_or(u32::MAX) }
+fn current_bucket(&self) -> u32 {
+	let bucket = now_secs()
+		.checked_div(self.window_secs.max(1))
+		.unwrap_or(0);
+
+	u32::try_from(bucket).unwrap_or(u32::MAX)
+}
 
 /// Wall-clock instant at the start of `bucket`.
+#[implement(super::Service)]
 #[inline]
 #[must_use]
-fn bucket_start(bucket: u32) -> SystemTime {
-	let offset = u64::from(bucket).saturating_mul(WINDOW_SECS);
+fn bucket_start(&self, bucket: u32) -> SystemTime {
+	let offset = u64::from(bucket).saturating_mul(self.window_secs);
 
 	UNIX_EPOCH
 		.checked_add(Duration::from_secs(offset))
 		.unwrap_or(UNIX_EPOCH)
 }
 
+#[implement(super::Service)]
 #[inline]
 #[must_use]
-fn earliest_retry(current_bucket: u32, streak: u32) -> SystemTime {
-	let delay = WINDOW
+fn earliest_retry(&self, current_bucket: u32, streak: u32) -> SystemTime {
+	let window = Duration::from_secs(self.window_secs);
+	let delay = window
 		.saturating_mul(streak)
 		.saturating_mul(streak)
 		.min(MAX_BACKOFF);
 
-	bucket_start(current_bucket)
+	self.bucket_start(current_bucket)
 		.checked_add(delay)
 		.unwrap_or_else(SystemTime::now)
 }

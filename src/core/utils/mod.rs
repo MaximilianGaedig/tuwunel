@@ -42,7 +42,10 @@ pub use self::{
 	string::{str_from_bytes, string_from_bytes},
 	sys::compute::available_parallelism,
 	time::{
-		exponential_backoff::{continue_exponential_backoff, continue_exponential_backoff_secs},
+		exponential_backoff::{
+			continue_exponential_backoff, continue_exponential_backoff_secs,
+			exponential_backoff_streak_cap,
+		},
 		now_millis as millis_since_unix_epoch, timepoint_ago, timepoint_from_now,
 		timepoint_has_passed,
 	},

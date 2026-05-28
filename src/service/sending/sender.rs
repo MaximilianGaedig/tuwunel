@@ -5,7 +5,7 @@ use std::{
 		Arc,
 		atomic::{AtomicU64, AtomicUsize, Ordering},
 	},
-	time::{Duration, Instant},
+	time::Duration,
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -44,7 +44,7 @@ use tuwunel_core::{
 	smallvec::SmallVec,
 	trace,
 	utils::{
-		BoolExt, ReadyExt, calculate_hash, continue_exponential_backoff_secs,
+		BoolExt, ReadyExt, calculate_hash,
 		future::TryExtExt,
 		stream::{BroadbandExt, IterStream, WidebandExt},
 	},
@@ -52,13 +52,15 @@ use tuwunel_core::{
 };
 
 use super::{Destination, EduBuf, EduVec, Msg, SendingEvent, Service, data::QueueItem};
-use crate::rooms::timeline::RawPduId;
+use crate::{federation::ShouldAttempt, rooms::timeline::RawPduId};
 
+/// In-flight bookkeeping for one `Destination`. Cross-attempt backoff lives
+/// in `peer_status` (federation only); appservice/push paths keep their own
+/// status because they are not server-keyed.
 #[derive(Debug)]
 enum TransactionStatus {
 	Running,
-	Failed(u32, Instant), // number of times failed, time of last failure
-	Retrying(u32),        // number of times failed
+	Retrying(u32), // number of times failed
 }
 
 type SendingError = (Destination, Error);
@@ -156,16 +158,12 @@ impl Service {
 
 	fn handle_response_err(dest: Destination, statuses: &mut CurTransactionStatus, e: &Error) {
 		debug!(dest = ?dest, "{e:?}");
+		// Retrying carries active requests forward; peer_status owns the timer.
 		statuses.entry(dest).and_modify(|e| {
 			*e = match e {
-				| TransactionStatus::Running => TransactionStatus::Failed(1, Instant::now()),
-
-				| &mut TransactionStatus::Retrying(ref n) =>
-					TransactionStatus::Failed(n.saturating_add(1), Instant::now()),
-
-				| TransactionStatus::Failed(..) => {
-					panic!("Request that was not even running failed?!")
-				},
+				| TransactionStatus::Running => TransactionStatus::Retrying(1),
+				| TransactionStatus::Retrying(n) =>
+					TransactionStatus::Retrying(n.saturating_add(1)),
 			}
 		});
 	}
@@ -307,7 +305,7 @@ impl Service {
 		new_events: Vec<QueueItem>, // Events we want to send: event and full key
 		statuses: &mut CurTransactionStatus,
 	) -> Result<Option<Vec<SendingEvent>>> {
-		let (allow, retry) = self.select_events_current(dest, statuses)?;
+		let (allow, retry) = self.select_events_current(dest, statuses).await?;
 
 		// Nothing can be done for this remote, bail out.
 		if !allow {
@@ -351,30 +349,34 @@ impl Service {
 		Ok(Some(events))
 	}
 
-	fn select_events_current(
+	async fn select_events_current(
 		&self,
 		dest: &Destination,
 		statuses: &mut CurTransactionStatus,
 	) -> Result<(bool, bool)> {
+		// peer_status gates federation only; appservice and push fall through.
+		if let Destination::Federation(server) = dest
+			&& matches!(
+				self.services
+					.federation
+					.should_attempt(server)
+					.await,
+				ShouldAttempt::No { .. },
+			) {
+			return Ok((false, false));
+		}
+
 		let (mut allow, mut retry) = (true, false);
 		statuses
-			.entry(dest.clone()) // TODO: can we avoid cloning?
+			.entry(dest.clone())
 			.and_modify(|e| match e {
-				TransactionStatus::Failed(tries, time) => {
-					// Fail if a request has failed recently (exponential backoff)
-					let min = self.server.config.sender_timeout;
-					let max = self.server.config.sender_retry_backoff_limit;
-					if continue_exponential_backoff_secs(min, max, time.elapsed(), *tries)
-						&& !matches!(dest, Destination::Appservice(_))
-					{
-						allow = false;
-					} else {
-						retry = true;
-						*e = TransactionStatus::Retrying(*tries);
-					}
-				},
-				TransactionStatus::Running | TransactionStatus::Retrying(_) => {
+				| TransactionStatus::Running => {
 					allow = false; // already running
+				},
+				| TransactionStatus::Retrying(_) => {
+					// Promote to Running so concurrent gating calls do not double-send.
+					retry = true;
+					*e = TransactionStatus::Running;
 				},
 			})
 			.or_insert(TransactionStatus::Running);

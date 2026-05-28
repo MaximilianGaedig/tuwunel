@@ -15,7 +15,10 @@ use tuwunel_core::{
 	error::inspect_debug_log, implement, trace,
 };
 
-use super::scheme::{FedAuth, FedPath};
+use super::{
+	Classification,
+	scheme::{FedAuth, FedPath},
+};
 use crate::resolver::actual::ActualDest;
 
 /// Sends a request to a federation server
@@ -85,8 +88,16 @@ where
 		.await?;
 
 	let request = self.prepare(&actual, dest, request)?;
-	self.perform::<T>(&actual, dest, request, client)
-		.await
+	let result = self
+		.perform::<T>(&actual, dest, request, client)
+		.await;
+
+	match &result {
+		| Ok(_) => self.record_success(dest),
+		| Err(_) => self.record_failure(dest, Classification::Transient),
+	}
+
+	result
 }
 
 #[implement(super::Service)]
