@@ -6,8 +6,9 @@ use futures::{
 };
 use rand::seq::SliceRandom;
 use ruma::{
-	CanonicalJsonObject, EventId, RoomId, ServerName, api::federation, events::TimelineEventType,
-	uint,
+	CanonicalJsonObject, EventId, OwnedServerName, RoomId, ServerName,
+	api::federation::backfill::get_backfill::v1::Request as BackfillRequest,
+	events::TimelineEventType, uint,
 };
 use serde_json::value::RawValue as RawJsonValue;
 use tuwunel_core::{
@@ -25,6 +26,11 @@ use tuwunel_core::{
 use tuwunel_database::Json;
 
 use super::ExtractBody;
+use crate::federation::ShouldAttempt;
+
+/// Three candidate buckets, ordered by [`ShouldAttempt`] verdict:
+/// `Yes`, `Deprioritize`, `No`.
+type RankedCandidates = (Vec<OwnedServerName>, Vec<OwnedServerName>, Vec<OwnedServerName>);
 
 #[implement(super::Service)]
 #[tracing::instrument(name = "backfill", level = "debug", skip(self))]
@@ -121,7 +127,7 @@ pub async fn backfill_if_required(&self, room_id: &RoomId, from: PduCount) -> Re
 		.map(ToOwned::to_owned)
 		.stream();
 
-	let mut servers = power_servers
+	let (yes, depri, no): RankedCandidates = power_servers
 		.chain(canonical_room_alias_server)
 		.chain(trusted_servers)
 		.ready_filter(|server_name| !self.services.globals.server_is_ours(server_name))
@@ -132,10 +138,36 @@ pub async fn backfill_if_required(&self, room_id: &RoomId, from: PduCount) -> Re
 				.await
 				.then_some(server_name)
 		})
-		.boxed();
+		.fold(RankedCandidates::default(), async |(mut y, mut d, mut n), server_name| {
+			match self
+				.services
+				.federation
+				.should_attempt(&server_name)
+				.await
+			{
+				| ShouldAttempt::Yes => y.push(server_name),
+				| ShouldAttempt::Deprioritize => d.push(server_name),
+				| ShouldAttempt::No { .. } => n.push(server_name),
+			}
+			(y, d, n)
+		})
+		.await;
 
-	while let Some(ref backfill_server) = servers.next().await {
-		let request = federation::backfill::get_backfill::v1::Request {
+	let fallthrough = yes.is_empty() && depri.is_empty();
+	if fallthrough && !no.is_empty() {
+		debug_warn!(
+			n = no.len(),
+			"All backfill candidates are backed off via peer_status; attempting anyway",
+		);
+	}
+
+	let pool = yes
+		.into_iter()
+		.chain(depri)
+		.chain(fallthrough.then_some(no).into_iter().flatten());
+
+	for backfill_server in pool {
+		let request = BackfillRequest {
 			room_id: room_id.to_owned(),
 			v: vec![first_pdu.event_id().to_owned()],
 			limit: uint!(100),
@@ -145,7 +177,7 @@ pub async fn backfill_if_required(&self, room_id: &RoomId, from: PduCount) -> Re
 		if let Ok(response) = self
 			.services
 			.federation
-			.execute(backfill_server, request)
+			.execute(&backfill_server, request)
 			.inspect_err(|e| {
 				warn!("{backfill_server} failed backfilling for room {room_id}: {e}");
 			})
@@ -157,7 +189,7 @@ pub async fn backfill_if_required(&self, room_id: &RoomId, from: PduCount) -> Re
 				.stream()
 				.for_each(async |pdu| {
 					if let Err(e) = self
-						.backfill_pdu(room_id, backfill_server, pdu)
+						.backfill_pdu(room_id, &backfill_server, pdu)
 						.await
 					{
 						debug_warn!("Failed to add backfilled pdu in room {room_id}: {e}");
