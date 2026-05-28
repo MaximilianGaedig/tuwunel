@@ -14,6 +14,7 @@ pub mod config;
 pub mod deactivate;
 pub mod emergency;
 pub mod federation;
+pub mod fetcher;
 pub mod globals;
 pub mod key_backups;
 pub mod media;
