@@ -275,20 +275,18 @@ async fn location_request(&self, location: &str) -> Result<Media> {
 		.map(TryFrom::try_from)
 		.and_then(Result::ok);
 
-	response
-		.bytes()
-		.await
-		.map(Vec::from)
-		.map_err(Into::into)
-		.map(|content| Media {
-			content,
-			content_type: content_type.clone(),
-			content_disposition: Some(make_content_disposition(
-				content_disposition.as_ref(),
-				content_type.as_deref(),
-				None,
-			)),
-		})
+	let limit = self.services.server.config.max_response_size;
+	let content = crate::client::read_response_capped(response, limit).await?;
+
+	Ok(Media {
+		content: content.to_vec(),
+		content_type: content_type.clone(),
+		content_disposition: Some(make_content_disposition(
+			content_disposition.as_ref(),
+			content_type.as_deref(),
+			None,
+		)),
+	})
 }
 
 #[implement(super::Service)]

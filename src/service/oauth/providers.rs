@@ -242,16 +242,18 @@ async fn configure(&self, mut provider: Provider) -> Result<Provider> {
 #[implement(Providers)]
 #[tracing::instrument(level = "debug", ret(level = "trace"), skip(self))]
 pub async fn discover(&self, provider: &Provider) -> Result<JsonValue> {
-	self.services
+	let limit = self.services.config.max_response_size;
+	let response = self
+		.services
 		.client
 		.oauth
 		.get(discovery_url(provider)?)
 		.send()
 		.await?
-		.error_for_status()?
-		.json()
-		.await
-		.map_err(Into::into)
+		.error_for_status()?;
+
+	let body = crate::client::read_response_capped(response, limit).await?;
+	serde_json::from_slice(&body).map_err(Into::into)
 }
 
 /// Compute the location of the `/.well-known/openid-configuration` based on the

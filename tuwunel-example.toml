@@ -344,6 +344,16 @@
 #
 #max_request_size = 24 MiB
 
+# Maximum size of a response body buffered from a remote server. Applies
+# to federation requests, push gateway and appservice transactions, and
+# remote media fetched for URL previews. A peer cannot be trusted to honor
+# a requested limit, so this bounds the response held in memory
+# regardless, guarding against a remote driving the process out of
+# memory. Accepts an integer byte count or a string with SI/IEC suffix
+# such as "256 MiB".
+#
+#max_response_size = 256 MiB
+
 # Maximum number of concurrently pending (asynchronous) media uploads a
 # user can have.
 #

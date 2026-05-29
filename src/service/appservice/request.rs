@@ -90,7 +90,8 @@ where
 			.expect("http::response::Builder is usable"),
 	);
 
-	let body = response.bytes().await?; // TODO: handle timeout
+	let limit = self.services.config.max_response_size;
+	let body = crate::client::read_response_capped(response, limit).await?;
 
 	if !status.is_success() {
 		debug_error!("Appservice response bytes: {:?}", utils::string_from_bytes(&body));

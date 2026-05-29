@@ -445,6 +445,21 @@ pub struct Config {
 	)]
 	pub max_request_size: usize,
 
+	/// Maximum size of a response body buffered from a remote server. Applies
+	/// to federation requests, push gateway and appservice transactions, and
+	/// remote media fetched for URL previews. A peer cannot be trusted to honor
+	/// a requested limit, so this bounds the response held in memory
+	/// regardless, guarding against a remote driving the process out of
+	/// memory. Accepts an integer byte count or a string with SI/IEC suffix
+	/// such as "256 MiB".
+	///
+	/// default: 256 MiB
+	#[serde(
+		default = "default_max_response_size",
+		deserialize_with = "deserialize_bytesize_usize"
+	)]
+	pub max_response_size: usize,
+
 	/// Maximum number of concurrently pending (asynchronous) media uploads a
 	/// user can have.
 	///
@@ -4007,6 +4022,8 @@ fn default_dns_timeout() -> u64 { 10 }
 fn default_ip_lookup_strategy() -> u8 { 5 }
 
 fn default_max_request_size() -> usize { 24 * 1024 * 1024 }
+
+fn default_max_response_size() -> usize { 256 * 1024 * 1024 }
 
 fn default_max_pending_media_uploads() -> usize { 5 }
 

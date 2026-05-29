@@ -261,12 +261,11 @@ where
 		request = request.bearer_auth(access_token);
 	}
 
-	let response: JsonValue = request
-		.send()
-		.await?
-		.error_for_status()?
-		.json()
-		.await?;
+	let limit = self.services.config.max_response_size;
+	let http_response = request.send().await?.error_for_status()?;
+
+	let body = crate::client::read_response_capped(http_response, limit).await?;
+	let response: JsonValue = serde_json::from_slice(&body)?;
 
 	if let Some(response) = response.as_object().as_ref()
 		&& let Some(error) = response.get("error").and_then(JsonValue::as_str)

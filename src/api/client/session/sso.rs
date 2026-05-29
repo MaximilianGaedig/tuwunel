@@ -34,6 +34,7 @@ use tuwunel_core::{
 };
 use tuwunel_service::{
 	Services,
+	client::read_response_capped,
 	media::MXC_LENGTH,
 	oauth::{
 		CODE_VERIFIER_LENGTH, Provider, SESSION_ID_LENGTH, Session, TokenResponse, UserInfo,
@@ -660,7 +661,8 @@ async fn set_avatar(
 	};
 
 	let content_disposition = make_content_disposition(None, content_type.as_deref(), None);
-	let bytes = response.bytes().await?;
+	let limit = services.server.config.max_response_size;
+	let bytes = read_response_capped(response, limit).await?;
 	services
 		.media
 		.create(&mxc, Some(user_id), Some(&content_disposition), content_type.as_deref(), &bytes)

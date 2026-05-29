@@ -5,9 +5,10 @@ use std::{
 	time::Duration,
 };
 
+use bytes::{Bytes, BytesMut};
 use ipaddress::{IPAddress, ipv4::from_u32 as ipv4_from_u32};
 use reqwest::{Certificate, Client, ClientBuilder, dns::Resolve, header::HeaderValue, redirect};
-use tuwunel_core::{Config, Result, either::Either, err, implement, trace};
+use tuwunel_core::{Config, Err, Result, debug, either::Either, err, implement, trace};
 
 use crate::{Services, service};
 
@@ -230,6 +231,36 @@ fn base(config: &Config, name: Option<&str>) -> Result<ClientBuilder> {
 		| Some(proxy) => Ok(builder.proxy(proxy)),
 		| _ => Ok(builder),
 	}
+}
+
+/// Buffer a remote response body, rejecting any response larger than `limit`
+/// bytes. reqwest enforces no response-size limit, so an unbounded `bytes()`
+/// lets a peer drive an allocator abort; refuse an oversized advertised length
+/// and hold the same bound while streaming for when that length is absent.
+pub async fn read_response_capped(
+	mut response: reqwest::Response,
+	limit: usize,
+) -> Result<Bytes> {
+	if let Some(len) = response.content_length()
+		&& len > limit.try_into().unwrap_or(u64::MAX)
+	{
+		debug!(%len, %limit, "rejecting response: advertised body exceeds limit");
+		return Err!(BadServerResponse(
+			"Response body length {len} exceeds the {limit} byte limit"
+		));
+	}
+
+	let mut body = BytesMut::new();
+	while let Some(chunk) = response.chunk().await? {
+		if body.len().saturating_add(chunk.len()) > limit {
+			debug!(%limit, "rejecting response: streamed body exceeds limit");
+			return Err!(BadServerResponse("Response body exceeds the {limit} byte limit"));
+		}
+
+		body.extend_from_slice(&chunk);
+	}
+
+	Ok(body.freeze())
 }
 
 #[cfg(any(
