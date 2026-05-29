@@ -7,7 +7,7 @@ ARG RUSTUP_HOME
 ARG CARGO_HOME
 ARG rust_toolchain
 ARG mrsdk_ref="tuwunel-changes"
-ARG complement_crypto_ref="ef6a633537023fbe5cc82fe750d6ed918775abdb"
+ARG complement_crypto_ref="186b985f2d62a36b4f7811fba92376229f06f582"
 ARG MRSDK_TARGET_DIR="/usr/src/matrix-rust-sdk/target"
 
 ENV PATH="${CARGO_HOME}/bin:${PATH}"
