@@ -143,6 +143,7 @@ ARG playwright_skip=""
 ARG playwright_shard="1/1"
 ARG playwright_count="1"
 ARG playwright_workers="1"
+ARG playwright_retries="1"
 
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 ENV CI=true
@@ -151,6 +152,7 @@ ENV playwright_skip=$playwright_skip
 ENV playwright_shard=$playwright_shard
 ENV playwright_count=$playwright_count
 ENV playwright_workers=$playwright_workers
+ENV playwright_retries=$playwright_retries
 
 # tester spawns testee as a sibling via the host docker daemon. Runtime
 # caller (bake.sh / `docker run`) supplies
@@ -176,6 +178,7 @@ npx playwright test \\
     --shard="\${playwright_shard}" \\
     --repeat-each="\${playwright_count}" \\
     --workers="\${playwright_workers}" \\
+    --retries="\${playwright_retries}" \\
     --max-failures=0 \\
     --reporter="list,json" \\
     2>&1 | tee /playwright/out/output.log

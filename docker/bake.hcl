@@ -589,6 +589,9 @@ variable "playwright_count" {
 variable "playwright_workers" {
     default = "1"
 }
+variable "playwright_retries" {
+    default = "1"
+}
 
 playwright_args = {
     element_web_ref    = "${element_web_ref}"
@@ -597,6 +600,7 @@ playwright_args = {
     playwright_shard   = "${playwright_shard}"
     playwright_count   = "${playwright_count}"
     playwright_workers = "${playwright_workers}"
+    playwright_retries = "${playwright_retries}"
 }
 
 # Tuwunel SUT for the Playwright suite. Long elem'd tag for matrix

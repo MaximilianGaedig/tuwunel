@@ -20,13 +20,13 @@ default_playwright_skip=""
 default_playwright_shard="1/1"
 default_playwright_count=1
 default_playwright_workers=8
+default_playwright_retries=1
 
 run="${1:-$default_playwright_run}"
 
 # Skip-list: alternation of substrings matched against test titles. Mirrors
 # the equivalent block in docker/complement.sh. Anything added here is a
-# permanent skip for the suite; per-test triage lives in
-# CLAUDE.plans/playwright_ci/skip_list.md.
+# permanent skip for the suite.
 skip="${default_playwright_skip}"
 
 set -a
@@ -46,11 +46,13 @@ envs="$envs -e playwright_skip=${playwright_skip:-$skip}"
 envs="$envs -e playwright_shard=${playwright_shard:-$default_playwright_shard}"
 envs="$envs -e playwright_count=${playwright_count:-$default_playwright_count}"
 envs="$envs -e playwright_workers=${playwright_workers:-$default_playwright_workers}"
+envs="$envs -e playwright_retries=${playwright_retries:-$default_playwright_retries}"
 
 set -x
 tester_image="playwright-tester--${sys_name}--${sys_version}--${sys_target}"
 testee_image="playwright-testee--${cargo_profile}--${rust_toolchain}--${rust_target}--${feat_set}--${sys_name}--${sys_version}--${sys_target}"
-name="playwright_tester__${sys_name}__${sys_version}__${sys_target}"
+shard_slug=$(printf '%s' "${playwright_shard:-$default_playwright_shard}" | tr '/' '_')
+name="playwright_tester__${sys_name}__${sys_version}__${sys_target}__${shard_slug}"
 sock="/var/run/docker.sock"
 arg="--name $name -v $sock:$sock --network=host $envs $tester_image"
 set +x

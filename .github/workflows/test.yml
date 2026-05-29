@@ -83,6 +83,9 @@ on:
       playwright_runner:
         type: string
         default: 'het'
+      playwright_workers:
+        type: string
+        default: '4'
 
 jobs:
   doc:
@@ -519,12 +522,13 @@ jobs:
     needs: [playwright]
     runs-on: ["${{matrix.machine}}", "${{inputs.playwright_runner}}"]
     concurrency:
-      group: playwright-cant-walk-and-chew-bubblegum
+      group: playwright-cant-walk-and-chew-bubblegum-${{matrix.shard}}
       cancel-in-progress: false
 
     strategy:
       fail-fast: false
       matrix:
+        shard: ${{fromJSON('[1, 2, 3, 4]')}}
         cargo_profile: ${{fromJSON('["bench"]')}}
         feat_set: ${{fromJSON('["logging"]')}}
         rust_toolchain: ${{fromJSON('["nightly"]')}}
@@ -544,6 +548,8 @@ jobs:
     - name: Execute
       id: execute
       env:
+        playwright_workers: ${{fromJSON(inputs.playwright_workers)}}
+        playwright_shard: ${{matrix.shard}}/4
         cargo_profile: ${{matrix.cargo_profile}}
         rust_toolchain: ${{matrix.rust_toolchain}}
         rust_target: ${{matrix.rust_target}}
@@ -557,25 +563,59 @@ jobs:
         docker/playwright.sh
 
     - if: success() || (failure() && steps.execute.outcome == 'failure')
-      name: Summarise
-      id: summarise
-      run: |
-        .github/workflows/playwright_summarise.sh
-
-    - if: success() || (failure() && (steps.execute.outcome == 'failure' || steps.summarise.outcome == 'failure'))
       name: Upload Results
       id: upload-result
       uses: actions/upload-artifact@v7
       with:
-        name: playwright_results-${{matrix.feat_set}}-${{matrix.sys_name}}-${{matrix.sys_target}}.json
+        name: playwright_results-${{matrix.feat_set}}-${{matrix.sys_name}}-${{matrix.sys_target}}-shard-${{matrix.shard}}.json
         path: ./tests/playwright/results.json
         if-no-files-found: ignore
 
-    - if: success() || (failure() && (steps.execute.outcome == 'failure' || steps.summarise.outcome == 'failure'))
+    - if: success() || (failure() && steps.execute.outcome == 'failure')
       name: Upload Log Output
       id: upload-output
       uses: actions/upload-artifact@v7
       with:
-        name: playwright_output-${{matrix.feat_set}}-${{matrix.sys_name}}-${{matrix.sys_target}}.log
+        name: playwright_output-${{matrix.feat_set}}-${{matrix.sys_name}}-${{matrix.sys_target}}-shard-${{matrix.shard}}.log
         path: ./tests/playwright/output.log
         if-no-files-found: ignore
+
+  acceptance-summary:
+    if: >
+      !failure() && !cancelled()
+      && fromJSON(inputs.enable_playwright)
+      && !contains(inputs.pipeline, '[ci no build]')
+      && inputs.machines
+      && contains(fromJSON(inputs.cargo_profiles), fromJSON('["bench"]')[0])
+      && contains(fromJSON(inputs.rust_toolchains), fromJSON('["nightly"]')[0])
+      && contains(fromJSON(inputs.sys_targets), fromJSON('["x86_64-v3-linux-gnu"]')[0])
+
+    name: Matrix Acceptance Summary
+    needs: [acceptance]
+    runs-on: ["${{fromJSON(inputs.machines)[0]}}", "${{inputs.playwright_runner}}"]
+
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        ref: ${{inputs.checkout}}
+
+    - name: Download Shard Results
+      uses: actions/download-artifact@v7
+      with:
+        pattern: playwright_results-*
+        path: ./shard-results
+        merge-multiple: false
+
+    - name: Merge and Summarise
+      shell: bash
+      run: |
+        mkdir -p tests/playwright
+        mapfile -t files < <(find ./shard-results -name results.json | sort)
+        echo "Merging ${#files[@]} shard result files (expected 4)."
+        # Keep the expected count in sync with the acceptance matrix shard list.
+        if test "${#files[@]}" -ne 4; then
+          echo "expected 4 shard results, found ${#files[@]}" >&2
+          exit 1
+        fi
+        jq -s '.' "${files[@]}" > tests/playwright/results.json
+        .github/workflows/playwright_summarise.sh
