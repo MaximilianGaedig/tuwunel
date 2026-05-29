@@ -40,7 +40,7 @@ use super::request::Request;
 pub(super) enum Token {
 	Appservice(Box<RegistrationInfo>),
 	User((OwnedUserId, OwnedDeviceId, Option<SystemTime>)),
-	Expired((OwnedUserId, OwnedDeviceId)),
+	Expired(String),
 	Invalid,
 	None,
 }
@@ -69,15 +69,15 @@ pub(super) async fn auth<A: AuthDispatch>(
 	let bearer: Option<TypedHeader<Authorization<Bearer>>> =
 		request.parts.extract().await.unwrap_or(None);
 
-	let token = match &bearer {
+	let access_token = match &bearer {
 		| Some(TypedHeader(Authorization(bearer))) => Some(bearer.token()),
 		| None => request.query.access_token.as_deref(),
 	};
 
-	let token = match find_token(services, token).await? {
-		| Token::User((user_id, device_id, expires_at))
+	let token = match find_token(services, access_token).await? {
+		| Token::User((_, _, expires_at))
 			if expires_at.is_some_and(is_less_than!(SystemTime::now())) =>
-			Token::Expired((user_id, device_id)),
+			Token::Expired(access_token.unwrap_or_default().to_owned()),
 
 		| token => token,
 	};

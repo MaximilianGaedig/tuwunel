@@ -1,7 +1,7 @@
 use std::any::TypeId;
 
 use ruma::{
-	CanonicalJsonValue, OwnedDeviceId, OwnedUserId,
+	CanonicalJsonValue,
 	api::{
 		auth_scheme::{
 			AccessToken, AccessTokenOptional, AppserviceToken, AppserviceTokenOptional,
@@ -12,7 +12,7 @@ use ruma::{
 		federation::{authentication::ServerSignatures, openid::get_openid_userinfo},
 	},
 };
-use tuwunel_core::{Err, Error, Result, utils::result::LogDebugErr};
+use tuwunel_core::{Err, Error, Result};
 use tuwunel_service::Services;
 
 use super::{Auth, Request, Token, appservice::auth_appservice, server::auth_server};
@@ -87,8 +87,7 @@ impl AuthDispatch for NoAuthentication {
 			},
 
 			| Token::Invalid => unknown_token(),
-			| Token::Expired((user_id, device_id)) =>
-				expired_token(services, user_id, device_id).await,
+			| Token::Expired(access_token) => expired_token(services, &access_token).await,
 
 			| Token::User(user) => Ok(Auth {
 				sender_user: Some(user.0),
@@ -119,8 +118,7 @@ impl AuthDispatch for AccessToken {
 	) -> Result<Auth> {
 		match token {
 			| Token::Invalid => unknown_token(),
-			| Token::Expired((user_id, device_id)) =>
-				expired_token(services, user_id, device_id).await,
+			| Token::Expired(access_token) => expired_token(services, &access_token).await,
 			| Token::Appservice(info) => Ok(auth_appservice(services, request, info).await?),
 			| Token::User(user) => Ok(Auth {
 				sender_user: Some(user.0),
@@ -150,8 +148,7 @@ impl AuthDispatch for AccessTokenOptional {
 	) -> Result<Auth> {
 		match token {
 			| Token::Invalid => unknown_token(),
-			| Token::Expired((user_id, device_id)) =>
-				expired_token(services, user_id, device_id).await,
+			| Token::Expired(access_token) => expired_token(services, &access_token).await,
 			| Token::User(user) => Ok(Auth {
 				sender_user: Some(user.0),
 				sender_device: Some(user.1),
@@ -179,8 +176,7 @@ impl AuthDispatch for AppserviceToken {
 	) -> Result<Auth> {
 		match token {
 			| Token::Invalid => unknown_token(),
-			| Token::Expired((user_id, device_id)) =>
-				expired_token(services, user_id, device_id).await,
+			| Token::Expired(access_token) => expired_token(services, &access_token).await,
 			| Token::User(_) =>
 				Err!(Request(Unauthorized("Appservice tokens must be used on this endpoint."))),
 			| Token::Appservice(info) => Ok(Auth {
@@ -204,8 +200,7 @@ impl AuthDispatch for AppserviceTokenOptional {
 	) -> Result<Auth> {
 		match token {
 			| Token::Invalid => unknown_token(),
-			| Token::Expired((user_id, device_id)) =>
-				expired_token(services, user_id, device_id).await,
+			| Token::Expired(access_token) => expired_token(services, &access_token).await,
 			| Token::User(user) => Ok(Auth {
 				sender_user: Some(user.0),
 				sender_device: Some(user.1),
@@ -233,8 +228,7 @@ impl AuthDispatch for ServerSignatures {
 	) -> Result<Auth> {
 		match token {
 			| Token::Invalid => unknown_token(),
-			| Token::Expired((user_id, device_id)) =>
-				expired_token(services, user_id, device_id).await,
+			| Token::Expired(access_token) => expired_token(services, &access_token).await,
 			| Token::Appservice(_) | Token::User(_) =>
 				Err!(Request(Unauthorized("Server signatures must be used on this endpoint."))),
 			| Token::None => Ok(auth_server(services, request, json_body).await?),
@@ -249,17 +243,11 @@ fn unknown_token() -> Result<Auth> {
 	))
 }
 
-async fn expired_token(
-	services: &Services,
-	user_id: OwnedUserId,
-	device_id: OwnedDeviceId,
-) -> Result<Auth> {
+async fn expired_token(services: &Services, access_token: &str) -> Result<Auth> {
 	services
 		.users
-		.remove_access_token(&user_id, &device_id)
-		.await
-		.log_debug_err()
-		.ok();
+		.remove_access_token_value(access_token)
+		.await;
 
 	Err(Error::BadRequest(
 		ErrorKind::UnknownToken(UnknownTokenErrorData { soft_logout: true }),

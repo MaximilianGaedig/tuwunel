@@ -97,7 +97,7 @@ pub(crate) async fn get_login_types_route(
 ///
 /// - The user needs to authenticate using their password (or if enabled using a
 ///   json web token)
-/// - If `device_id` is known: invalidates old access token of that device
+/// - If `device_id` is known: issues an additional access token for that device
 /// - If `device_id` is unknown: creates a new device
 /// - Returns access token that is associated with the user and device
 ///

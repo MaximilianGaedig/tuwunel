@@ -193,11 +193,6 @@ pub async fn set_access_token(
 			.await?;
 	}
 
-	// Remove old token.
-	self.remove_access_token(user_id, device_id)
-		.await
-		.ok();
-
 	let expires_at = expires_in
 		.map(timepoint_from_now)
 		.transpose()?
@@ -206,10 +201,27 @@ pub async fn set_access_token(
 		.map(Duration::as_secs);
 
 	let userdeviceid = (user_id, device_id);
+
+	// Fold the prior pointer token into the index for pre-index upgrades.
+	if let Ok(prev) = self
+		.db
+		.userdeviceid_token
+		.qry(&userdeviceid)
+		.await
+		.deserialized::<String>()
+	{
+		self.db
+			.userdeviceidtoken_index
+			.put_raw((user_id, device_id, prev.as_str()), []);
+	}
+
 	let value = (user_id, device_id, expires_at);
 	self.db
 		.token_userdeviceid
 		.raw_put(access_token, value);
+	self.db
+		.userdeviceidtoken_index
+		.put_raw((user_id, device_id, access_token), []);
 	self.db
 		.userdeviceid_token
 		.put_raw(userdeviceid, access_token);
@@ -217,31 +229,57 @@ pub async fn set_access_token(
 	Ok(())
 }
 
-/// Revoke the access token without deleting the device. Take care to not leave
-/// dangling devices if using this method.
+/// Revoke every access token of one device, without deleting the device. Take
+/// care to not leave dangling devices if using this method.
 #[implement(super::Service)]
 pub async fn remove_access_token(&self, user_id: &UserId, device_id: &DeviceId) -> Result {
-	let userdeviceid = (user_id, device_id);
-	let access_token = self
+	let prefix = (user_id, device_id, Interfix);
+	self.db
+		.userdeviceidtoken_index
+		.keys_prefix(&prefix)
+		.ignore_err()
+		.ready_for_each(|(_, _, token): (Ignore, Ignore, &str)| {
+			self.db.token_userdeviceid.remove(token);
+			self.db
+				.userdeviceidtoken_index
+				.del((user_id, device_id, token));
+		})
+		.await;
+
+	// Cover any pre-index token still recorded only in the legacy pointer.
+	if let Ok(token) = self
 		.db
 		.userdeviceid_token
-		.qry(&userdeviceid)
-		.await?;
-
-	self.db.userdeviceid_token.del(userdeviceid);
-	self.db.token_userdeviceid.remove(&access_token);
+		.qry(&(user_id, device_id))
+		.await
+		.deserialized::<String>()
+	{
+		self.db.token_userdeviceid.remove(token.as_str());
+	}
+	self.db
+		.userdeviceid_token
+		.del((user_id, device_id));
 
 	Ok(())
 }
 
+/// Revoke a single access token by value, leaving the device and any other
+/// tokens it holds intact.
 #[implement(super::Service)]
-pub async fn get_access_token(&self, user_id: &UserId, device_id: &DeviceId) -> Result<String> {
-	let key = (user_id, device_id);
-	self.db
-		.userdeviceid_token
-		.qry(&key)
+pub async fn remove_access_token_value(&self, access_token: &str) {
+	if let Ok((user_id, device_id, _)) = self
+		.db
+		.token_userdeviceid
+		.get(access_token)
 		.await
-		.deserialized()
+		.deserialized::<(OwnedUserId, OwnedDeviceId, Option<u64>)>()
+	{
+		self.db
+			.userdeviceidtoken_index
+			.del((&*user_id, &*device_id, access_token));
+	}
+
+	self.db.token_userdeviceid.remove(access_token);
 }
 
 #[implement(super::Service)]
@@ -350,16 +388,6 @@ pub async fn remove_refresh_token(&self, user_id: &UserId, device_id: &DeviceId)
 	self.db.token_userdeviceid.remove(&refresh_token);
 
 	Ok(())
-}
-
-#[implement(super::Service)]
-pub async fn get_refresh_token(&self, user_id: &UserId, device_id: &DeviceId) -> Result<String> {
-	let key = (user_id, device_id);
-	self.db
-		.userdeviceid_refresh
-		.qry(&key)
-		.await
-		.deserialized()
 }
 
 #[must_use]
