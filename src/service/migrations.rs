@@ -76,6 +76,7 @@ async fn backfill_server_name(services: &Services) -> Result {
 		.stream()
 		.ready_any(|user_id| services.globals.user_is_local(user_id))
 		.await
+		.into_option()
 		.ok_or_else(|| {
 			err!(Database(
 				"Database has no users from {server_name}; refusing to reuse with this \

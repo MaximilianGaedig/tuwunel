@@ -570,6 +570,7 @@ impl Service {
 			.map(|count| {
 				count
 					.ge(&0)
+					.into_option()
 					.ok_or_else(|| err!(Request(NotFound("Failed to remove on any provider."))))
 			})
 			.await

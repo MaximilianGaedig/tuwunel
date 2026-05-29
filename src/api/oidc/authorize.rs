@@ -116,6 +116,7 @@ async fn validate_redirect_uri(services: &Services, params: &AuthorizeParams) ->
 		.redirect_uris
 		.iter()
 		.any(|uri| redirect_uri_matches(uri, &params.redirect_uri))
+		.into_option()
 		.ok_or_else(|| err!(Request(InvalidParam("redirect_uri not registered for this client"))))
 }
 

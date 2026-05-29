@@ -143,4 +143,4 @@ pub fn and7(
 	a.and3(b, c, d).and3(e, f, g)
 }
 
-fn test(test: bool) -> crate::Result<(), ()> { test.ok_or(()) }
+fn test(test: bool) -> crate::Result<(), ()> { test.into_result() }

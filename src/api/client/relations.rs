@@ -153,7 +153,9 @@ async fn paginate_relations_with_filter(
 		.state_accessor
 		.user_can_see_state_events(sender_user, room_id)
 		.map(|visible| {
-			visible.ok_or_else(|| err!(Request(Forbidden("You cannot view this room."))))
+			visible
+				.into_option()
+				.ok_or_else(|| err!(Request(Forbidden("You cannot view this room."))))
 		});
 
 	let shortroomid = services.short.get_shortroomid(room_id);
