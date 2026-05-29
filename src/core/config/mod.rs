@@ -540,6 +540,18 @@ pub struct Config {
 	#[serde(default = "default_federation_timeout")]
 	pub federation_timeout: u64,
 
+	/// Timeout (seconds) for client-initiated federation key lookups, namely
+	/// /keys/query and /keys/claim against remote servers. Should be well
+	/// below `federation_timeout` so an interactive request to an unresponsive
+	/// server does not outlast the requesting client's own send deadline. A
+	/// lookup that exceeds this bound records a transient federation failure
+	/// for that server, so subsequent lookups back off instead of blocking
+	/// again.
+	///
+	/// default: 8
+	#[serde(default = "default_federation_keys_timeout")]
+	pub federation_keys_timeout: u64,
+
 	/// Federation client idle connection pool timeout (seconds).
 	///
 	/// default: 25
@@ -4019,6 +4031,8 @@ fn default_well_known_conn_timeout() -> u64 { 6 }
 fn default_well_known_timeout() -> u64 { 10 }
 
 fn default_federation_timeout() -> u64 { 25 }
+
+fn default_federation_keys_timeout() -> u64 { 8 }
 
 fn default_federation_idle_timeout() -> u64 { 25 }
 

@@ -1,4 +1,4 @@
-use std::{fmt::Debug, mem};
+use std::{fmt::Debug, mem, time::Duration};
 
 use bytes::Bytes;
 use ipaddress::IPAddress;
@@ -16,7 +16,7 @@ use tuwunel_core::{
 };
 
 use super::{
-	Classification,
+	Classification, ShouldAttempt,
 	scheme::{FedAuth, FedPath},
 };
 use crate::resolver::actual::ActualDest;
@@ -32,6 +32,38 @@ where
 {
 	let client = &self.services.client.federation;
 	self.execute_on(client, dest, request).await
+}
+
+/// Client-initiated key lookup (`/keys/query`, `/keys/claim`) over federation:
+/// skips servers already in backoff, bounds the request by
+/// `federation_keys_timeout`, and records a transient failure on timeout so a
+/// waiting client is not held past its own send deadline.
+#[implement(super::Service)]
+#[tracing::instrument(skip_all, name = "keys", level = "debug")]
+pub async fn execute_keys<T>(&self, dest: &ServerName, request: T) -> Result<T::IncomingResponse>
+where
+	T: OutgoingRequest + Debug + Send,
+	T::Authentication: FedAuth,
+	T::PathBuilder: FedPath,
+{
+	if matches!(self.should_attempt(dest).await, ShouldAttempt::No { .. }) {
+		return Err!("{dest} is in federation backoff; skipping key lookup");
+	}
+
+	let timeout = Duration::from_secs(
+		self.services
+			.server
+			.config
+			.federation_keys_timeout,
+	);
+
+	match tokio::time::timeout(timeout, self.execute(dest, request)).await {
+		| Ok(result) => result,
+		| Err(_elapsed) => {
+			self.record_failure(dest, Classification::Transient);
+			Err!("{dest} key lookup exceeded {}s", timeout.as_secs())
+		},
+	}
 }
 
 /// Like execute() but with a very large timeout

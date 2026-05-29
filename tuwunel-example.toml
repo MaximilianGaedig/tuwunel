@@ -419,6 +419,16 @@
 #
 #federation_timeout = 300
 
+# Timeout (seconds) for client-initiated federation key lookups, namely
+# /keys/query and /keys/claim against remote servers. Should be well
+# below `federation_timeout` so an interactive request to an unresponsive
+# server does not outlast the requesting client's own send deadline. A
+# lookup that exceeds this bound records a transient federation failure
+# for that server, so subsequent lookups back off instead of blocking
+# again.
+#
+#federation_keys_timeout = 8
+
 # Federation client idle connection pool timeout (seconds).
 #
 #federation_idle_timeout = 25

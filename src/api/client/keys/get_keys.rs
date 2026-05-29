@@ -259,21 +259,31 @@ where
 		.into_iter()
 		.stream()
 		.broad_then(async |(server, device_keys)| {
+			let failed = || Keys {
+				failures: BTreeMap::from([(server.to_string(), json!({}))]),
+				..Default::default()
+			};
+
 			let request = federation::keys::get_keys::v1::Request { device_keys };
 
-			(server, services.federation.execute(server, request).await)
-		})
-		.broad_then(async |(server, response)| match response {
-			| Ok(response) =>
-				process_federation_response(services, sender_user, allowed_signatures, response)
+			match services
+				.federation
+				.execute_keys(server, request)
+				.await
+			{
+				| Ok(response) =>
+					process_federation_response(
+						services,
+						sender_user,
+						allowed_signatures,
+						response,
+					)
 					.await,
-			| Err(e) => {
-				debug_warn!(%server, "key federation request failed: {e}");
-				Keys {
-					failures: BTreeMap::from([(server.to_string(), json!({}))]),
-					..Default::default()
-				}
-			},
+				| Err(e) => {
+					debug_warn!(%server, "key federation request failed: {e}");
+					failed()
+				},
+			}
 		})
 		.ready_fold(Keys::default(), Keys::merge)
 		.await

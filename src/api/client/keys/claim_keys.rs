@@ -124,11 +124,16 @@ async fn collect_federation_one_time_keys(
 		.into_iter()
 		.stream()
 		.broad_then(async |(server, one_time_keys)| {
+			let failed = || Claims {
+				failures: [(server.to_string(), json!({}))].into(),
+				..Default::default()
+			};
+
 			let request = federation::keys::claim_keys::v1::Request { one_time_keys };
 
 			match services
 				.federation
-				.execute(server, request)
+				.execute_keys(server, request)
 				.await
 				.inspect_err(
 					|e| debug_warn!(%server, "claim_keys federation request failed: {e}"),
@@ -137,10 +142,7 @@ async fn collect_federation_one_time_keys(
 					one_time_keys: keys.one_time_keys,
 					failures: Default::default(),
 				},
-				| Err(_e) => Claims {
-					failures: [(server.to_string(), json!({}))].into(),
-					..Default::default()
-				},
+				| Err(_e) => failed(),
 			}
 		})
 		.ready_fold(Claims::default(), Claims::merge)
