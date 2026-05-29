@@ -10,7 +10,7 @@ use ipaddress::{IPAddress, ipv4::from_u32 as ipv4_from_u32};
 use reqwest::{Certificate, Client, ClientBuilder, dns::Resolve, header::HeaderValue, redirect};
 use tuwunel_core::{Config, Err, Result, debug, either::Either, err, implement, trace};
 
-use crate::{Services, service};
+use crate::{Services, resolver::Validating, service};
 
 pub struct Clients {
 	pub default: Client,
@@ -85,7 +85,7 @@ fn make_clients(services: &Services) -> Result<Clients> {
 			let bind_addr = interface.clone().and_then(Either::left);
 			let bind_iface = interface.clone().and_then(Either::right);
 
-			let resolver = crate::resolver::Validating::new(
+			let resolver = Validating::new(
 				Arc::clone(&services.resolver.resolver),
 				Arc::clone(&services.client.cidr_range_denylist),
 			);
@@ -97,7 +97,10 @@ fn make_clients(services: &Services) -> Result<Clients> {
 		}),
 
 		extern_media: with!(cb => cb
-			.dns_resolver(Arc::clone(&services.resolver.resolver))
+			.dns_resolver(Validating::new(
+				Arc::clone(&services.resolver.resolver),
+				Arc::clone(&services.client.cidr_range_denylist),
+			))
 			.redirect(redirect::Policy::limited(3))),
 
 		well_known: with!(cb => cb

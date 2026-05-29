@@ -277,7 +277,7 @@ async fn download_html(
 }
 
 #[implement(Service)]
-fn check_url_host(&self, url: &Url) -> Result {
+pub(super) fn check_url_host(&self, url: &Url) -> Result {
 	let host = url
 		.host()
 		.ok_or_else(|| err!(Request(Unknown("URL has no host"))))?;

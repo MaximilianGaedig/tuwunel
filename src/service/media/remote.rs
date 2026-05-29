@@ -15,6 +15,7 @@ use tuwunel_core::{
 	Err, Error, Result, debug_warn, err, implement,
 	utils::content_disposition::make_content_disposition,
 };
+use url::Url;
 
 use super::{Dim, Media};
 use crate::federation::scheme::{FedAuth, FedPath};
@@ -253,13 +254,27 @@ async fn handle_location(&self, mxc: &Mxc<'_>, location: &str) -> Result<Media> 
 
 #[implement(super::Service)]
 async fn location_request(&self, location: &str) -> Result<Media> {
+	let url = Url::parse(location)
+		.map_err(|e| err!(Request(Unknown("Invalid media location URL: {e}"))))?;
+
+	self.check_url_host(&url)?;
+
 	let response = self
 		.services
 		.client
 		.extern_media
-		.get(location)
+		.get(url.as_str())
 		.send()
 		.await?;
+
+	if let Some(remote_addr) = response.remote_addr()
+		&& !self
+			.services
+			.client
+			.valid_cidr_range_ip(remote_addr.ip())
+	{
+		return Err!(Request(Forbidden("Requesting from this address is forbidden")));
+	}
 
 	let content_type = response
 		.headers()
