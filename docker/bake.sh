@@ -97,6 +97,12 @@ if test "$CI" = "true"; then
     export BUILDKIT_PROGRESS="plain"
 fi
 
+# Bootstrap a docker-container builder if it doesn't exist
+if ! docker buildx inspect "$builder_name" >/dev/null 2>&1; then
+    docker buildx create --name "$builder_name" --driver docker-container --bootstrap
+fi
+docker buildx use "$builder_name"
+
 args=""
 args="$args --provenance=false"
 args="$args --builder ${builder_name}"

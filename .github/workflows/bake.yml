@@ -101,7 +101,7 @@ jobs:
       ${{matrix.sys_version}}
       ${{matrix.sys_target}}
 
-    runs-on: ["${{matrix.machine}}", "${{inputs.runner}}"]
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: ${{inputs.fail_fast}}
       max-parallel: ${{inputs.max-parallel}}

@@ -1,22 +1,22 @@
 #!/bin/bash
 
 set +e
-docker buildx inspect "${GITHUB_ACTOR}"
+docker buildx inspect "${GITHUB_ACTOR}" >/dev/null 2>&1
 if test x"$?" = x"0"; then
 	exit 0
 fi
 
 set -eux
 
-reserved_space=$(echo -n "$reserved_space" | jq -r ".$runner")
-max_used_space=$(echo -n "$max_used_space" | jq -r ".$runner")
-min_free_space=$(echo -n "$min_free_space" | jq -r ".$runner")
-safety_free_space=$(echo -n "$safety_free_space" | jq -r ".$runner")
-trunk_max_used=$(echo -n "$trunk_max_used" | jq -r ".$runner")
-branch_max_used=$(echo -n "$branch_max_used" | jq -r ".$runner")
-unlabeled_max_used=$(echo -n "$unlabeled_max_used" | jq -r ".$runner")
-leaf_max_used=$(echo -n "$leaf_max_used" | jq -r ".$runner")
-cachemount_max_used=$(echo -n "$cachemount_max_used" | jq -r ".$runner")
+reserved_space=$(echo -n "$reserved_space" | jq -r '."'"$runner"'" // "48GB"')
+max_used_space=$(echo -n "$max_used_space" | jq -r '."'"$runner"'" // "64GB"')
+min_free_space=$(echo -n "$min_free_space" | jq -r '."'"$runner"'" // "16GB"')
+safety_free_space=$(echo -n "$safety_free_space" | jq -r '."'"$runner"'" // "8GB"')
+trunk_max_used=$(echo -n "$trunk_max_used" | jq -r '."'"$runner"'" // "12GB"')
+branch_max_used=$(echo -n "$branch_max_used" | jq -r '."'"$runner"'" // "16GB"')
+unlabeled_max_used=$(echo -n "$unlabeled_max_used" | jq -r '."'"$runner"'" // "4GB"')
+leaf_max_used=$(echo -n "$leaf_max_used" | jq -r '."'"$runner"'" // "20GB"')
+cachemount_max_used=$(echo -n "$cachemount_max_used" | jq -r '."'"$runner"'" // "8GB"')
 
 cat <<EOF > ./buildkitd.toml
 [system]

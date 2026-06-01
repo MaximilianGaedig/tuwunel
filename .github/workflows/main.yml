@@ -85,7 +85,7 @@ concurrency:
 jobs:
   init:
     name: Init
-    runs-on: ${{matrix.runner}}
+    runs-on: ubuntu-latest
     env:
       default_cargo_profiles: '["test", "bench", "release"]'
       default_feat_sets: '["none", "default", "all"]'
@@ -125,13 +125,12 @@ jobs:
       enable_test_memcheck: ${{fromJSON(inputs.enable_test_memcheck || env.is_test)}}
       enable_test_smoke: ${{fromJSON(inputs.enable_test_smoke || env.is_fat || 'false')}}
       enable_test_nix: ${{fromJSON(inputs.enable_test_nix || 'true')}}
-      enable_test_rustsdk: ${{fromJSON(inputs.enable_test_rustsdk || 'true')}}
-      enable_test_complement: ${{fromJSON(inputs.enable_test_complement || 'true')}}
-      complement_verbose: ${{fromJSON(inputs.complement_verbose || 'false')}}
+      enable_test_rustsdk: ${{fromJSON(github.repository == 'matrix-construct/tuwunel' && (inputs.enable_test_rustsdk || 'true') || 'false')}}
+      enable_test_complement: ${{fromJSON(github.repository == 'matrix-construct/tuwunel' && (inputs.enable_test_complement || 'true') || 'false')}}
+      enable_test_playwright: ${{fromJSON(github.repository == 'matrix-construct/tuwunel' && (inputs.enable_test_playwright || env.is_dev) || 'false')}}
       complement_runner: 'het'
-      enable_test_complement_crypto: ${{fromJSON(inputs.enable_test_complement_crypto || 'true')}}
+      enable_test_complement_crypto: ${{fromJSON(github.repository == 'matrix-construct/tuwunel' && (inputs.enable_test_complement_crypto || 'true') || 'false')}}
       complement_crypto_verbose: ${{fromJSON(inputs.complement_crypto_verbose || 'false')}}
-      enable_test_playwright: ${{fromJSON(inputs.enable_test_playwright || env.is_dev || 'false')}}
       playwright_runner: 'het'
       enable_package: ${{fromJSON(inputs.enable_package || 'true')}}
       enable_package_book: ${{fromJSON(inputs.enable_package_book || 'true')}}
@@ -157,7 +156,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        runner: ${{fromJSON(inputs.runners || vars.RUNNERS || '["het"]')}}
+        runner: ${{fromJSON(inputs.runners || vars.RUNNERS || '["ubuntu-latest"]')}}
         machine: ${{fromJSON(inputs.machines || vars.MACHINES || '["X64"]')}}
         exclude: ${{fromJSON(vars.RUNNERS_EXCLUDES || '[]')}}
 
@@ -383,56 +382,4 @@ jobs:
           {"sys_target": "x86_64-v4-linux-gnu", "bake_target": "nix"},
         ]
 
-  publish:
-    if: >
-      !failure() && !cancelled()
-      && fromJSON(needs.init.outputs.enable_publish)
-      && !contains(needs.init.outputs.pipeline, '[ci only it]')
-      && !contains(needs.init.outputs.pipeline, '[ci no build]')
-      && !contains(needs.init.outputs.pipeline, '[ci no package]')
-      && !contains(needs.init.outputs.pipeline, '[ci no publish]')
-
-    name: Publish
-    needs: [init, test, package]
-    uses: ./.github/workflows/publish.yml
-    with:
-      checkout: ${{needs.init.outputs.checkout}}
-      docker_repo: ${{needs.init.outputs.docker_repo}}
-      docker_acct: ${{needs.init.outputs.docker_acct}}
-      release_url: ${{needs.init.outputs.release_url}}
-      pages_url: ${{needs.init.outputs.pages_url}}
-      cargo_profiles: ${{needs.init.outputs.cargo_profiles}}
-      feat_sets: ${{needs.init.outputs.feat_sets}}
-      rust_toolchains: ${{needs.init.outputs.rust_toolchains}}
-      rust_targets: ${{needs.init.outputs.rust_targets}}
-      sys_names: ${{needs.init.outputs.sys_names}}
-      sys_targets: ${{needs.init.outputs.sys_targets}}
-      sys_versions: ${{needs.init.outputs.sys_versions}}
-      machines: ${{needs.init.outputs.machines}}
-      excludes: >
-        [
-          {"feat_set": "none"},
-          {"feat_set": "default"},
-          {"cargo_profile": "test"},
-          {"cargo_profile": "bench"},
-          {"cargo_profile": "release-debuginfo"},
-          {"cargo_profile": "release-native"},
-          {"rust_toolchain": "nightly"},
-          {"rust_target": "aarch64-unknown-linux-gnu", "sys_target": "x86_64-v1-linux-gnu"},
-          {"rust_target": "aarch64-unknown-linux-gnu", "sys_target": "x86_64-v2-linux-gnu"},
-          {"rust_target": "aarch64-unknown-linux-gnu", "sys_target": "x86_64-v3-linux-gnu"},
-          {"rust_target": "aarch64-unknown-linux-gnu", "sys_target": "x86_64-v4-linux-gnu"},
-          {"rust_target": "x86_64-unknown-linux-gnu", "sys_target": "aarch64-v8-linux-gnu"},
-          {"sys_target": "aarch64-v8-linux-gnu", "machine": "X64"},
-          {"sys_target": "x86_64-v1-linux-gnu", "machine": "ARM64"},
-          {"sys_target": "x86_64-v2-linux-gnu", "machine": "ARM64"},
-          {"sys_target": "x86_64-v2-linux-gnu", "feat_set": "logging"},
-          {"sys_target": "x86_64-v3-linux-gnu", "machine": "ARM64"},
-          {"sys_target": "x86_64-v3-linux-gnu", "feat_set": "logging"},
-          {"sys_target": "x86_64-v4-linux-gnu", "machine": "ARM64"},
-          {"sys_target": "x86_64-v4-linux-gnu", "feat_set": "logging"},
-        ]
-
-    secrets:
-      ghcr_token: ${{ secrets.GHCR_TOKEN }}
-      dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
+  # publish job removed for fork compatibility
