@@ -464,7 +464,7 @@ in the [Out of scope](#out-of-scope) section.
 | MSC4145 | ❌ ● | 0/0 | Simple verified accounts | m.verified profile field and endpoint not implemented |
 | MSC4143 | ✅ ◐ | 80/80 | MatrixRTC | GET rtc/transports routed; only HS-side requirement of the MSC |
 | MSC4141 | ❌ ● | 0/0 | Time based notification filtering | time_and_day push rule condition not supported |
-| MSC4140 | ❌ ● | 0/0 | Cancellable delayed events | delayed events endpoints not implemented despite Ruma types |
+| MSC4140 | ✅ ◐ | 80/80 | Cancellable delayed events | delayed event endpoints, GETs, delay_id unsigned data, and state-cancellation hook implemented |
 | MSC4136 | ❌ ● | 0/0 | Shared retry hints between servers | retry_hints in /send_join response not implemented |
 | MSC4128 | ✅ ● | 100/100 | Error on invalid auth where it is optional | invalid token returns error even on optional auth endpoints |
 | MSC4127 | ❌ ● | 0/0 | Removal of query string auth | removal of query string auth not implemented; still accepted |
@@ -1138,4 +1138,3 @@ place of the (uniformly empty) `Correct/Impl` cell.
 | MSC688 | ⬛ ● | closed | Room Summaries (was: Calculate room names server-side) | stub Google doc; room summary work moved to heroes/MSC688 in spec |
 | MSC455 | ⬛ ● | closed | Do we want to specify a matrix:// URI scheme for rooms? (SPEC-5) | [→ MSC2312] stub Google doc; matrix:// URI scheme superseded by matrix: URI (... |
 | MSC441 | ⬛ ● | closed | Support for Reactions / Aggregations | [→ MSC2675/MSC2676] stub-only Google doc; superseded by MSC2675/MSC2676 react... |
-

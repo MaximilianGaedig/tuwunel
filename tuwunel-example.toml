@@ -633,6 +633,20 @@
 #
 #allow_encryption = true
 
+# Maximum allowed delay for delayed events (MSC4140), in milliseconds.
+# Set to 0 to disable delayed events entirely.
+#
+# reloadable: yes
+#
+#max_event_delay_ms = 604800000 (7 days)
+
+# Maximum number of scheduled delayed events per user. Set to 0 for
+# unlimited.
+#
+# reloadable: yes
+#
+#max_delayed_events_per_user = 1024
+
 # Controls whether locally-created rooms should be end-to-end encrypted by
 # default. This option is equivalent to the one found in Synapse.
 #

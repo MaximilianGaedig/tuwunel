@@ -52,6 +52,18 @@ pub(super) static MAPS: &[Descriptor] = &[
 		..descriptor::RANDOM_SMALL
 	},
 	Descriptor {
+		name: "delayid_event",
+		..descriptor::RANDOM_SMALL
+	},
+	Descriptor {
+		name: "delayedevent_timeout",
+		..descriptor::SEQUENTIAL_SMALL
+	},
+	Descriptor {
+		name: "sender_delayedevents",
+		..descriptor::RANDOM_SMALL
+	},
+	Descriptor {
 		name: "backupid_etag",
 		..descriptor::RANDOM_SMALL
 	},

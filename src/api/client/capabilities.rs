@@ -94,5 +94,16 @@ pub(crate) async fn get_capabilities_route(
 		capabilities.account_moderation = AccountModerationCapability::new(true, true);
 	}
 
+	// MSC4140: delayed events capability
+	let max_delay = services.config.max_event_delay_ms;
+	if max_delay > 0 {
+		capabilities.set(
+			"org.matrix.msc4140",
+			json!({
+				"max_delay": max_delay,
+			}),
+		)?;
+	}
+
 	Ok(get_capabilities::v3::Response { capabilities })
 }

@@ -794,6 +794,22 @@ pub struct Config {
 	#[serde(default = "true_fn")]
 	pub allow_encryption: bool,
 
+	/// Maximum allowed delay for delayed events (MSC4140), in milliseconds.
+	/// Set to 0 to disable delayed events entirely.
+	///
+	/// reloadable: yes
+	/// default: 604800000 (7 days)
+	#[serde(default = "default_max_event_delay_ms")]
+	pub max_event_delay_ms: u64,
+
+	/// Maximum number of scheduled delayed events per user. Set to 0 for
+	/// unlimited.
+	///
+	/// reloadable: yes
+	/// default: 1024
+	#[serde(default = "default_max_delayed_events_per_user")]
+	pub max_delayed_events_per_user: u64,
+
 	/// Controls whether locally-created rooms should be end-to-end encrypted by
 	/// default. This option is equivalent to the one found in Synapse.
 	///
@@ -3969,6 +3985,10 @@ impl TlsConfig {
 }
 
 fn true_fn() -> bool { true }
+
+fn default_max_event_delay_ms() -> u64 { 604_800_000 }
+
+fn default_max_delayed_events_per_user() -> u64 { 1024 }
 
 fn default_policy_server_request_timeout() -> u64 { 5 }
 

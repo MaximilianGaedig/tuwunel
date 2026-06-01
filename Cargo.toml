@@ -392,6 +392,7 @@ features = [
     "unstable-msc4121",
     "unstable-msc4125",
     "unstable-msc4133",
+    "unstable-msc4140", # delayed events
     "unstable-msc4143",
     "unstable-msc4186",
     "unstable-msc4195",

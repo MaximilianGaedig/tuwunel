@@ -176,8 +176,22 @@ fn register_client_room_routes(router: Router<State>) -> Router<State> {
 
 fn register_client_state_and_sync_routes(router: Router<State>) -> Router<State> {
 	router
-		.ruma_route(&client::send_message_event_route)
-		.ruma_route(&client::send_state_event_for_key_route)
+		.route(
+			"/_matrix/client/r0/rooms/{room_id}/send/{event_type}/{txn_id}",
+			axum::routing::put(client::send_message_event_dispatch),
+		)
+		.route(
+			"/_matrix/client/v3/rooms/{room_id}/send/{event_type}/{txn_id}",
+			axum::routing::put(client::send_message_event_dispatch),
+		)
+		.route(
+			"/_matrix/client/r0/rooms/{room_id}/state/{event_type}/{state_key}",
+			axum::routing::put(client::send_state_event_for_key_dispatch),
+		)
+		.route(
+			"/_matrix/client/v3/rooms/{room_id}/state/{event_type}/{state_key}",
+			axum::routing::put(client::send_state_event_for_key_dispatch),
+		)
 		.ruma_route(&client::get_state_events_route)
 		.ruma_route(&client::get_state_events_for_key_route)
 		// Ruma doesn't have support for multiple paths for a single endpoint yet, and these
@@ -186,23 +200,23 @@ fn register_client_state_and_sync_routes(router: Router<State>) -> Router<State>
 		.route(
 			"/_matrix/client/r0/rooms/{room_id}/state/{event_type}",
 			get(client::get_state_events_for_empty_key_route)
-				.put(client::send_state_event_for_empty_key_route),
+				.put(client::send_state_event_for_empty_key_dispatch),
 		)
 		.route(
 			"/_matrix/client/v3/rooms/{room_id}/state/{event_type}",
 			get(client::get_state_events_for_empty_key_route)
-				.put(client::send_state_event_for_empty_key_route),
+				.put(client::send_state_event_for_empty_key_dispatch),
 		)
 		// These two endpoints allow trailing slashes
 		.route(
 			"/_matrix/client/r0/rooms/{room_id}/state/{event_type}/",
 			get(client::get_state_events_for_empty_key_route)
-				.put(client::send_state_event_for_empty_key_route),
+				.put(client::send_state_event_for_empty_key_dispatch),
 		)
 		.route(
 			"/_matrix/client/v3/rooms/{room_id}/state/{event_type}/",
 			get(client::get_state_events_for_empty_key_route)
-				.put(client::send_state_event_for_empty_key_route),
+				.put(client::send_state_event_for_empty_key_dispatch),
 		)
 		.ruma_route(&client::events_route)
 		.ruma_route(&client::sync_events_route)
@@ -216,6 +230,27 @@ fn register_client_state_and_sync_routes(router: Router<State>) -> Router<State>
 		.ruma_route(&client::get_relating_events_with_rel_type_route)
 		.ruma_route(&client::get_relating_events_route)
 		.ruma_route(&client::get_hierarchy_route)
+		.ruma_route(&client::update_delayed_event_route)
+		.route(
+			"/_matrix/client/unstable/org.matrix.msc4140/delayed_events/{delay_id}",
+			get(client::get_delayed_event_route),
+		)
+		.route(
+			"/_matrix/client/unstable/org.matrix.msc4140/delayed_events/{delay_id}/cancel",
+			post(client::cancel_delayed_event_route),
+		)
+		.route(
+			"/_matrix/client/unstable/org.matrix.msc4140/delayed_events/{delay_id}/restart",
+			post(client::restart_delayed_event_route),
+		)
+		.route(
+			"/_matrix/client/unstable/org.matrix.msc4140/delayed_events/{delay_id}/send",
+			post(client::send_delayed_event_route),
+		)
+		.route(
+			"/_matrix/client/unstable/org.matrix.msc4140/delayed_events",
+			get(client::list_delayed_events_route),
+		)
 }
 
 fn register_client_media_and_device_routes(router: Router<State>) -> Router<State> {

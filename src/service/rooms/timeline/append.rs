@@ -302,6 +302,19 @@ async fn append_pdu_effects(
 		| _ => {},
 	}
 
+	if let Some(state_key) = pdu.state_key() {
+		let event_type = pdu.kind().to_string();
+		let cancelled = self
+			.services
+			.delayed_events
+			.cancel_matching_state_events(pdu.room_id(), &event_type, state_key, pdu.sender())
+			.await;
+
+		if cancelled > 0 {
+			tracing::trace!(?cancelled, event_type = %event_type, state_key, "Cancelled matching delayed state events");
+		}
+	}
+
 	if let Ok(content) = pdu.get_content::<ExtractRelatesToEventId>()
 		&& let Ok(related_pducount) = self
 			.get_pdu_count(&content.relates_to.event_id)

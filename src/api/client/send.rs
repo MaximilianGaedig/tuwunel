@@ -1,22 +1,15 @@
 use std::collections::BTreeMap;
 
-use axum::extract::State;
-use futures::{FutureExt, future::try_join3};
 use ruma::{
-	DeviceId, RoomId, TransactionId, UserId,
+	DeviceId, TransactionId, UserId,
 	api::client::message::send_message_event,
-	events::{
-		AnyMessageLikeEventContent, MessageLikeEventType, reaction::ReactionEventContent,
-		room::redaction::RoomRedactionEventContent,
-	},
-	serde::Raw,
+	events::{MessageLikeEventType, room::redaction::RoomRedactionEventContent},
 };
 use serde_json::from_str;
 use tuwunel_core::{
 	Err, Result, err,
 	matrix::pdu::PduBuilder,
 	utils::{self},
-	warn,
 };
 use tuwunel_service::Services;
 
@@ -31,59 +24,32 @@ use crate::Ruma;
 /// - The only requirement for the content is that it has to be valid json
 /// - Tries to send the event into the room, auth rules will determine if it is
 ///   allowed
-pub(crate) async fn send_message_event_route(
-	State(services): State<crate::State>,
-	body: Ruma<send_message_event::v3::Request>,
-) -> Result<send_message_event::v3::Response> {
+pub(crate) async fn send_message_event_helper(
+	services: &crate::State,
+	body: &Ruma<send_message_event::v3::Request>,
+) -> Result<ruma::OwnedEventId> {
 	let sender_user = body.sender_user();
 	let sender_device = body.sender_device.as_deref();
 	let appservice_info = body.appservice_info.as_ref();
 
-	if body.event_type == MessageLikeEventType::RoomRedaction
-		&& services.config.disable_local_redactions
-		&& !services.admin.user_is_admin(sender_user).await
-	{
-		if let Some(event_id) = body
-			.body
-			.body
-			.deserialize_as_unchecked::<RoomRedactionEventContent>()
-			.ok()
-			.and_then(|content| content.redacts)
-		{
-			warn!(
-				%sender_user,
-				%event_id,
-				"Local redactions are disabled, non-admin user attempted to redact an event"
-			);
-		} else {
-			warn!(
-				%sender_user,
-				event = %body.body.body.json(),
-				"Local redactions are disabled, non-admin user attempted to redact an event \
-				 with an invalid redaction event"
-			);
-		}
-
-		return Err!(Request(Forbidden("Redactions are disabled on this server.")));
-	}
-
-	// Forbid m.room.encrypted if encryption is disabled
-	if body.event_type == MessageLikeEventType::RoomEncrypted && !services.config.allow_encryption
-	{
-		return Err!(Request(Forbidden("Encryption has been disabled")));
-	}
-
-	let state_lock = services.state.mutex.lock(&body.room_id).await;
-
-	let (existing_txnid, ..) = try_join3(
-		check_existing_txnid(&services, sender_user, sender_device, &body.txn_id).map(Ok),
-		check_duplicate_reaction(&services, &body.event_type, sender_user, &body.body.body),
-		check_public_call_invite(&services, &body.event_type, &body.room_id),
+	tuwunel_service::rooms::event_policy::validate_message_event_policy(
+		services,
+		sender_user,
+		&body.event_type,
+		&body.body.body,
+		&body.room_id,
 	)
 	.await?;
 
-	if let Some(existing_txnid) = existing_txnid {
-		return existing_txnid;
+	let state_lock = services.state.mutex.lock(&body.room_id).await;
+
+	if let Some(existing_txnid) =
+		check_existing_txnid(services, sender_user, sender_device, &body.txn_id).await
+	{
+		return match existing_txnid {
+			| Ok(response) => Ok(response.event_id),
+			| Err(e) => Err(e),
+		};
 	}
 
 	let mut unsigned = BTreeMap::new();
@@ -134,54 +100,7 @@ pub(crate) async fn send_message_event_route(
 
 	drop(state_lock);
 
-	Ok(send_message_event::v3::Response { event_id })
-}
-
-async fn check_public_call_invite(
-	services: &Services,
-	event_type: &MessageLikeEventType,
-	room_id: &RoomId,
-) -> Result {
-	if *event_type != MessageLikeEventType::CallInvite {
-		return Ok(());
-	}
-
-	if !services.directory.is_public_room(room_id).await {
-		return Ok(());
-	}
-
-	Err!(Request(Forbidden("Room call invites are not allowed in public rooms")))
-}
-
-// Forbid duplicate reactions
-async fn check_duplicate_reaction(
-	services: &Services,
-	event_type: &MessageLikeEventType,
-	sender_user: &UserId,
-	body: &Raw<AnyMessageLikeEventContent>,
-) -> Result {
-	if *event_type != MessageLikeEventType::Reaction {
-		return Ok(());
-	}
-
-	let Ok(content) = body.deserialize_as_unchecked::<ReactionEventContent>() else {
-		return Ok(());
-	};
-
-	if !services
-		.pdu_metadata
-		.event_has_relation(
-			&content.relates_to.event_id,
-			Some(sender_user),
-			None,
-			Some(&content.relates_to.key),
-		)
-		.await
-	{
-		return Ok(());
-	}
-
-	Err!(Request(DuplicateAnnotation("Duplicate reactions are not allowed.")))
+	Ok(event_id)
 }
 
 /// Check if this is a new transaction id. Returns Some when the transaction id
