@@ -517,13 +517,13 @@ impl Service {
 	}
 
 	#[cfg(not(feature = "ldap"))]
-	#[expect(clippy::unused_async)]
+	#[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
 	pub async fn search_ldap(&self, _user_id: &UserId) -> Result<Vec<(String, bool)>> {
 		Err!(FeatureDisabled("ldap"))
 	}
 
 	#[cfg(not(feature = "ldap"))]
-	#[expect(clippy::unused_async)]
+	#[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
 	pub async fn auth_ldap(&self, _user_dn: &str, _password: &str) -> Result {
 		Err!(FeatureDisabled("ldap"))
 	}

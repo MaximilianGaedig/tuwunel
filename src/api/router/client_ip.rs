@@ -47,6 +47,7 @@ where
 {
 	type Rejection = (StatusCode, &'static str);
 
+	#[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
 	async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
 		const ERROR: StatusCode = StatusCode::INTERNAL_SERVER_ERROR;
 

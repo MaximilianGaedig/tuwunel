@@ -192,7 +192,7 @@ pub async fn download_image(&self, response: reqwest::Response) -> Result<UrlPre
 
 #[cfg(not(feature = "url_preview"))]
 #[implement(Service)]
-#[expect(clippy::unused_async)]
+#[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
 pub async fn download_image(&self, _response: reqwest::Response) -> Result<UrlPreviewData> {
 	Err!(FeatureDisabled("url_preview"))
 }
@@ -267,7 +267,7 @@ async fn download_html(
 
 #[cfg(not(feature = "url_preview"))]
 #[implement(Service)]
-#[expect(clippy::unused_async)]
+#[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
 async fn download_html(
 	&self,
 	_url: &Url,
