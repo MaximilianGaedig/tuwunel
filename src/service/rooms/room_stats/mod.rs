@@ -42,6 +42,8 @@ struct Update {
 	sender: String,
 	delta: i64,
 	ts: Option<u64>,
+	/// When the message was sent (milliseconds): which month and which hour of the week it counts in.
+	at: u64,
 	bytes: Bytes,
 }
 
@@ -114,6 +116,10 @@ pub struct SenderCount {
 }
 
 pub struct Stats {
+	/// Messages per calendar month, `(year * 100 + month, count)`, oldest first.
+	pub months: Vec<(u32, u64)>,
+	/// Messages per hour of the week in UTC, Monday 00:00 first (168 entries).
+	pub hours: Vec<u64>,
 	pub bytes: Bytes,
 	pub counts: Vec<SenderCount>,
 	pub first_ts: Option<u64>,
@@ -144,6 +150,10 @@ struct FileContent {
 struct MediaInfo {
 	size: Option<u64>,
 }
+
+/// Counters `shortroomid | 5 | year*100+month` (big-endian u32) and `shortroomid | 6 | hour of week` (u16).
+const MONTHS: u8 = 5;
+const HOURS: u8 = 6;
 
 /// Counters `shortroomid | 4 | which`: bytes of events, of stored media, of on-demand media.
 const BYTES: u8 = 4;
@@ -213,7 +223,7 @@ pub fn count_pdu<E: Event>(&self, shortroomid: ShortRoomId, pdu: &E) {
 	let content = pdu.get_content::<MessageContent>().ok();
 	let mut bytes = self.bytes_of(pdu.content().get().len(), content.as_ref());
 	bytes.event = bytes.event.saturating_add(EVENT_OVERHEAD);
-	self.change(shortroomid, class, pdu.sender(), 1, Some(ts), bytes);
+	self.change(shortroomid, class, pdu.sender(), 1, Some(ts), ts, bytes);
 }
 
 /// Takes a purged message off its counter.
@@ -223,7 +233,7 @@ pub fn uncount_pdu<E: Event>(&self, shortroomid: ShortRoomId, pdu: &E) {
 	if let Some(class) = class_of(pdu.kind(), content.as_ref()) {
 		let mut bytes = self.bytes_of(pdu.content().get().len(), content.as_ref());
 		bytes.event = bytes.event.saturating_add(EVENT_OVERHEAD);
-		self.change(shortroomid, class, pdu.sender(), -1, None, bytes);
+		self.change(shortroomid, class, pdu.sender(), -1, None, u64::from(pdu.origin_server_ts().get()), bytes);
 	}
 }
 
@@ -237,6 +247,10 @@ pub fn uncount_json(&self, shortroomid: ShortRoomId, pdu: &CanonicalJsonObject) 
 		return;
 	};
 
+	let at = match pdu.get("origin_server_ts") {
+		| Some(CanonicalJsonValue::Integer(ts)) => u64::try_from(i64::from(*ts)).unwrap_or(0),
+		| _ => 0,
+	};
 	let content_value = pdu
 		.get("content")
 		.and_then(|content| serde_json::to_value(content).ok());
@@ -250,12 +264,21 @@ pub fn uncount_json(&self, shortroomid: ShortRoomId, pdu: &CanonicalJsonObject) 
 	if let Ok(sender) = <&UserId>::try_from(sender.as_str()) {
 		let mut bytes = self.bytes_of(event_len, content.as_ref());
 		bytes.event = bytes.event.saturating_add(EVENT_OVERHEAD);
-		self.change(shortroomid, class, sender, -1, None, bytes);
+		self.change(shortroomid, class, sender, -1, None, at, bytes);
 	}
 }
 
 #[implement(Service)]
-fn change(&self, shortroomid: ShortRoomId, class: Class, sender: &UserId, delta: i64, ts: Option<u64>, bytes: Bytes) {
+fn change(
+	&self,
+	shortroomid: ShortRoomId,
+	class: Class,
+	sender: &UserId,
+	delta: i64,
+	ts: Option<u64>,
+	at: u64,
+	bytes: Bytes,
+) {
 	// The receiver only goes away at shutdown, when there is nothing left to count for.
 	let _ = self.queue.send(Update {
 		shortroomid,
@@ -263,6 +286,7 @@ fn change(&self, shortroomid: ShortRoomId, class: Class, sender: &UserId, delta:
 		sender: sender.to_string(),
 		delta,
 		ts,
+		at,
 		bytes,
 	});
 }
@@ -307,8 +331,14 @@ fn apply(&self, batch: Vec<Update>) {
 	let mut deltas: BTreeMap<Vec<u8>, i64> = BTreeMap::new();
 	let mut spans: BTreeMap<ShortRoomId, (u64, u64)> = BTreeMap::new();
 	let mut bytes: BTreeMap<(ShortRoomId, u8), i64> = BTreeMap::new();
+	let mut buckets: BTreeMap<(ShortRoomId, u8, u32), i64> = BTreeMap::new();
 
 	for update in batch {
+		if update.at > 0 {
+			let (month, hour_of_week) = calendar(update.at);
+			*buckets.entry((update.shortroomid, MONTHS, month)).or_default() += update.delta;
+			*buckets.entry((update.shortroomid, HOURS, hour_of_week)).or_default() += update.delta;
+		}
 		for (which, amount) in [
 			(1_u8, update.bytes.event),
 			(2, update.bytes.media_stored),
@@ -329,6 +359,22 @@ fn apply(&self, batch: Vec<Update>) {
 	}
 
 	for (key, delta) in deltas {
+		let current = self
+			.db
+			.roomstats
+			.get_blocking(&key)
+			.ok()
+			.and_then(|value| <[u8; 8]>::try_from(value.as_ref()).ok())
+			.map_or(0, u64::from_be_bytes);
+		self.db
+			.roomstats
+			.insert(&key, current.saturating_add_signed(delta).to_be_bytes());
+	}
+
+	for ((shortroomid, kind, bucket), delta) in buckets {
+		let mut key = shortroomid.to_be_bytes().to_vec();
+		key.push(kind);
+		key.extend_from_slice(&bucket.to_be_bytes());
 		let current = self
 			.db
 			.roomstats
@@ -432,7 +478,40 @@ pub async fn stats(&self, shortroomid: ShortRoomId) -> Stats {
 			.map_or(0, u64::from_be_bytes)
 	};
 
+	let mut months = Vec::new();
+	let mut hours = vec![0_u64; 168];
+	for (kind, out_months) in [(MONTHS, true), (HOURS, false)] {
+		let mut kprefix = shortroomid.to_be_bytes().to_vec();
+		kprefix.push(kind);
+		let head = kprefix.len();
+		let mut entries = pin!(
+			self.db
+				.roomstats
+				.raw_stream_from(&kprefix)
+				.ignore_err()
+				.ready_take_while(|(key, _)| key.starts_with(&kprefix))
+		);
+		while let Some((key, value)) = entries.next().await {
+			let (Ok(bucket), Ok(count)) = (
+				<[u8; 4]>::try_from(key.get(head..head.saturating_add(4)).unwrap_or_default()),
+				<[u8; 8]>::try_from(value),
+			) else {
+				continue;
+			};
+			let (bucket, count) = (u32::from_be_bytes(bucket), u64::from_be_bytes(count));
+			if out_months {
+				if count > 0 {
+					months.push((bucket, count));
+				}
+			} else if let Some(slot) = hours.get_mut(bucket as usize) {
+				*slot = count;
+			}
+		}
+	}
+
 	Stats {
+		months,
+		hours,
 		bytes: Bytes {
 			event: read_bytes(1),
 			media_stored: read_bytes(2),
@@ -485,6 +564,31 @@ async fn rebuild_room(&self, room_id: &RoomId) -> Result<usize> {
 	Ok(counted)
 }
 
+/// The calendar month (`year * 100 + month`) and the hour of the week (Monday 00:00 is 0) of a time in
+/// milliseconds since the epoch, in UTC.
+fn calendar(ms: u64) -> (u32, u32) {
+	let secs = ms / 1000;
+	let days = i64::try_from(secs / 86_400).unwrap_or(0);
+	let hour = u32::try_from((secs % 86_400) / 3600).unwrap_or(0);
+	// 1970-01-01 was a Thursday; Monday is 0.
+	let weekday = u32::try_from((days + 3).rem_euclid(7)).unwrap_or(0);
+
+	// Civil date from days since the epoch (Howard Hinnant's algorithm).
+	let z = days + 719_468;
+	let era = z.div_euclid(146_097);
+	let doe = z.rem_euclid(146_097);
+	let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+	let mut year = yoe + era * 400;
+	let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+	let mp = (5 * doy + 2) / 153;
+	let month = if mp < 10 { mp + 3 } else { mp - 9 };
+	if month <= 2 {
+		year += 1;
+	}
+
+	(u32::try_from(year * 100 + month).unwrap_or(0), weekday * 24 + hour)
+}
+
 fn class_of(kind: &TimelineEventType, content: Option<&MessageContent>) -> Option<Class> {
 	match kind {
 		| TimelineEventType::Sticker => Some(Class::Sticker),
@@ -511,4 +615,19 @@ fn count_key(shortroomid: ShortRoomId, class: Class, sender: &str) -> Vec<u8> {
 	key.push(class as u8);
 	key.extend_from_slice(sender.as_bytes());
 	key
+}
+
+#[cfg(test)]
+mod tests {
+	use super::calendar;
+
+	#[test]
+	fn calendar_month_and_hour_of_week() {
+		// Thursday 1970-01-01 00:00 UTC: month 197001, Monday-based hour 3 * 24.
+		assert_eq!(calendar(0), (197_001, 72));
+		// Friday 2024-03-15 13:45:00 UTC.
+		assert_eq!(calendar(1_710_510_300_000), (202_403, 4 * 24 + 13));
+		// Tuesday 2000-02-29 23:59:59 UTC (a leap day).
+		assert_eq!(calendar(951_868_799_000), (200_002, 24 + 23));
+	}
 }

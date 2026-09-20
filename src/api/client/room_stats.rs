@@ -43,6 +43,13 @@ pub struct SenderStats {
 	pub by_kind: BTreeMap<String, u64>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct MonthCount {
+	/// `2024-03`.
+	pub month: String,
+	pub count: u64,
+}
+
 /// What a chat takes up on this server, in bytes.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Storage {
@@ -77,6 +84,12 @@ pub struct Response {
 
 	/// False until the counters have covered the room's whole history.
 	pub complete: bool,
+
+	/// Messages per calendar month, oldest first: how the chat's activity moved over the years.
+	pub by_month: Vec<MonthCount>,
+
+	/// Messages per hour of the week in UTC (168 entries, Monday 00:00 first): when people write.
+	pub by_hour_of_week: Vec<u64>,
 }
 
 /// # `GET /_matrix/client/unstable/im.mxg.stats/rooms/{roomId}`
@@ -140,5 +153,11 @@ pub(crate) async fn get_room_stats_route(
 		first_ts: stats.first_ts,
 		last_ts: stats.last_ts,
 		complete: stats.complete,
+		by_month: stats
+			.months
+			.iter()
+			.map(|(ym, count)| MonthCount { month: format!("{:04}-{:02}", ym / 100, ym % 100), count: *count })
+			.collect(),
+		by_hour_of_week: stats.hours,
 	})
 }
