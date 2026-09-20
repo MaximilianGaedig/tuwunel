@@ -255,7 +255,7 @@ where
 }
 
 #[implement(super::Service)]
-async fn append_pdu_effects(
+pub(super) async fn append_pdu_effects(
 	&self,
 	pdu_id: RawPduId,
 	pdu: &PduEvent,
@@ -434,7 +434,7 @@ async fn append_member_effects(&self, pdu: &PduEvent, count: PduCount) -> Result
 }
 
 #[implement(super::Service)]
-fn append_pdu_json(&self, pdu_id: &RawPduId, pdu: &PduEvent, json: &CanonicalJsonObject) {
+pub(super) fn append_pdu_json(&self, pdu_id: &RawPduId, pdu: &PduEvent, json: &CanonicalJsonObject) {
 	debug_assert!(matches!(pdu_id.pdu_count(), PduCount::Normal(_)), "PduCount not Normal");
 
 	let mut txn = self.db.db.txn();

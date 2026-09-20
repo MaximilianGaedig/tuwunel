@@ -433,7 +433,9 @@ fn register_client_media_and_device_routes(
 }
 
 fn register_client_media_index_routes(router: Router<State>) -> Router<State> {
-	router.ruma_route(&client::get_room_media_route)
+	router
+		.ruma_route(&client::get_room_media_route)
+		.ruma_route(&client::batch_send_route)
 }
 
 fn register_client_misc_routes(router: Router<State>) -> Router<State> {

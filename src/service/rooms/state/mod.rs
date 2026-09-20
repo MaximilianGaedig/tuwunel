@@ -700,6 +700,24 @@ pub async fn get_room_shortstatehash(&self, room_id: &RoomId) -> Result<ShortSta
 		.deserialized()
 }
 
+/// Records that an event has the given state snapshot, for events the server
+/// did not derive a state for itself (an imported batch's).
+#[implement(Service)]
+pub async fn set_event_shortstatehash(&self, event_id: &EventId, shortstatehash: ShortStateHash) {
+	const KEY_LEN: usize = size_of::<ShortEventId>();
+	const VAL_LEN: usize = size_of::<ShortStateHash>();
+
+	let shorteventid = self
+		.services
+		.short
+		.get_or_create_shorteventid(event_id)
+		.await;
+
+	self.db
+		.shorteventid_shortstatehash
+		.aput::<KEY_LEN, VAL_LEN, _, _>(shorteventid, shortstatehash);
+}
+
 /// Returns the state hash recorded for an event.
 ///
 /// The event ID is first resolved to its short event ID before the snapshot

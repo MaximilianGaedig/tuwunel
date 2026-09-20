@@ -6,6 +6,7 @@
 
 mod append;
 mod backfill;
+mod batch;
 mod build;
 mod create;
 mod pdus;
@@ -50,7 +51,10 @@ use tuwunel_database::{Database, Deserialized, Json, Map, Txn};
 /// Re-exports the standard timeline item and count-key transformation.
 ///
 /// Timeline consumers use these alongside the service's directional streams.
-pub use self::pdus::{PdusIterItem, bias_count};
+pub use self::{
+	batch::{BatchEvent, BatchOptions},
+	pdus::{PdusIterItem, bias_count},
+};
 use crate::rooms::{
 	short::{ShortRoomId, ShortStateHash},
 	state_res::FetchEvent,

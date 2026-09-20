@@ -81,9 +81,11 @@ static VERSIONS: [&str; 27] = [
 	"v1.19",  /* mutual rooms (MSC2666) */
 ];
 
-static UNSTABLE_FEATURES: [&str; 41] = [
+static UNSTABLE_FEATURES: [&str; 42] = [
 	// a room's media, files, links, music and voice lists, from an index
 	"im.mxg.media_index",
+	// bridges importing a chat's history, before or after what a room has
+	"com.beeper.batch_sending",
 	"org.matrix.e2e_cross_signing",
 	// private read receipts (https://github.com/matrix-org/matrix-spec-proposals/pull/2285)
 	"org.matrix.msc2285.stable",
