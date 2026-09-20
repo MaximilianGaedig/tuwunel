@@ -82,6 +82,8 @@ static VERSIONS: [&str; 27] = [
 ];
 
 static UNSTABLE_FEATURES: [&str; 41] = [
+	// a room's media, files, links, music and voice lists, from an index
+	"im.mxg.media_index",
 	"org.matrix.e2e_cross_signing",
 	// private read receipts (https://github.com/matrix-org/matrix-spec-proposals/pull/2285)
 	"org.matrix.msc2285.stable",

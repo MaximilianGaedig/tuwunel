@@ -472,6 +472,10 @@ pub async fn backfill_pdu(
 	);
 	drop(insert_lock);
 
+	self.services
+		.media_index
+		.index_pdu(shortroomid, &pdu_id, &pdu);
+
 	match pdu.kind {
 		| TimelineEventType::RoomMessage => {
 			if let Ok(ExtractBody { body: Some(body) }) = pdu.get_content() {

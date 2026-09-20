@@ -263,6 +263,11 @@ async fn append_pdu_effects(
 	count: PduCount,
 	state_lock: &RoomMutexGuard,
 ) -> Result {
+	// The media index lists a room's pictures, files, links, music and voice messages.
+	self.services
+		.media_index
+		.index_pdu(shortroomid, &pdu_id, pdu);
+
 	match *pdu.kind() {
 		| TimelineEventType::RoomRedaction => {
 			let room_version = self

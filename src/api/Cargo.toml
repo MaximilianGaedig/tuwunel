@@ -18,6 +18,11 @@ crate-type = [
 ]
 
 [features]
+# ruma's request/response macros generate their client and server halves behind these; the
+# endpoints this crate defines itself (client/media_index.rs) need them.
+default = ["client", "server"]
+client = []
+server = []
 brotli_compression = [
 	"reqwest/brotli",
 	"tuwunel-core/brotli_compression",

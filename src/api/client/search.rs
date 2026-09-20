@@ -107,7 +107,9 @@ async fn category_room_events(
 				.is_ok()
 				.then_some(room_id)
 		})
-		.filter_map(async |room_id| {
+		// Searching every joined room one after another is what makes an all-rooms search slow
+		// for an account with many rooms; each room's index lookup is independent.
+		.wide_filter_map(async |room_id| {
 			let query = RoomQuery {
 				room_id: &room_id,
 				user_id: Some(sender_user),

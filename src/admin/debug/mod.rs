@@ -22,6 +22,7 @@ mod list_dependencies;
 mod memory_stats;
 mod parse_pdu;
 mod ping;
+mod rebuild_media_index;
 mod rebuild_relation_index;
 mod rebuild_thread_index;
 mod resolve_true_destination;
@@ -328,6 +329,10 @@ pub(super) enum DebugCommand {
 	/// - Rebuild the thread activity index (threadactivityid_rootid) from all
 	///   thread roots
 	RebuildThreadIndex,
+
+	/// - Rebuild the media index (roommediaids) from all rooms' messages, so
+	///   the media, files, links, music and voice lists cover old history
+	RebuildMediaIndex,
 
 	/// - Retrieves the saved original PDU before it has been redacted
 	GetRetainedPdu {

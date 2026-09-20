@@ -47,6 +47,7 @@ pub fn build(router: Router<State>, server: &Server) -> Router<State> {
 		config.media_deny_inline_styles,
 	);
 
+	let router = register_client_media_index_routes(router);
 	let router = register_client_misc_routes(router);
 	let router = register_synapse_admin_users_routes(router, mas_active);
 	let router = register_synapse_admin_devices_routes(router, mas_active);
@@ -429,6 +430,10 @@ fn register_client_media_and_device_routes(
 		.ruma_route(&client::get_dehydrated_events_route)
 		.ruma_route(&client::send_event_to_device_route)
 		.merge(media_content_router)
+}
+
+fn register_client_media_index_routes(router: Router<State>) -> Router<State> {
+	router.ruma_route(&client::get_room_media_route)
 }
 
 fn register_client_misc_routes(router: Router<State>) -> Router<State> {

@@ -4,6 +4,7 @@ pub mod delete;
 pub mod directory;
 pub mod event_handler;
 pub mod lazy_loading;
+pub mod media_index;
 pub mod metadata;
 pub mod pdu_metadata;
 pub mod read_receipt;

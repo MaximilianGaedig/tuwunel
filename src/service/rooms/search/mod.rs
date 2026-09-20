@@ -3,7 +3,7 @@ use std::sync::Arc;
 use futures::{Stream, StreamExt};
 use ruma::{RoomId, UserId, api::client::search::search_events::v3::Criteria};
 use tuwunel_core::{
-	PduCount, Result,
+	Result,
 	arrayvec::ArrayVec,
 	implement,
 	matrix::event::{Event, Matches},
@@ -15,10 +15,7 @@ use tuwunel_core::{
 };
 use tuwunel_database::{Map, Txn, keyval::Val};
 
-use crate::rooms::{
-	short::ShortRoomId,
-	timeline::{PduId, RawPduId},
-};
+use crate::rooms::{short::ShortRoomId, timeline::RawPduId};
 
 pub struct Service {
 	db: Data,
@@ -149,15 +146,28 @@ async fn search_pdu_ids_query_room(
 	tokenize(&query.criteria.search_term)
 		.stream()
 		.wide_then(async |word| {
-			self.search_pdu_ids_query_words(shortroomid, &word)
-				.collect::<Vec<_>>()
-				.await
+			let mut ids: Vec<_> = self
+				.search_pdu_ids_query_words(shortroomid, &word)
+				.collect()
+				.await;
+
+			// Prefix matches arrive grouped by the word that matched; the terms are
+			// intersected below, which needs one order: newest first.
+			ids.sort_unstable_by(|a: &RawPduId, b: &RawPduId| b.as_ref().cmp(a.as_ref()));
+			ids.dedup();
+			ids
 		})
 		.collect::<Vec<_>>()
 		.await
 }
 
-/// Iterate over PduId's containing a word
+/// Iterate over PduId's whose message has a word starting with `word`.
+///
+/// Matching a prefix rather than the whole word is what lets a client search as
+/// the user types ("phot" finding "photos"), the way other chat apps do. The
+/// index key is `shortroomid | word | SEP | pduid`, so every word starting with
+/// the term shares the prefix `shortroomid | word` and the id is the key's last
+/// bytes, whichever word matched.
 #[implement(Service)]
 fn search_pdu_ids_query_words<'a>(
 	&'a self,
@@ -165,25 +175,27 @@ fn search_pdu_ids_query_words<'a>(
 	word: &'a str,
 ) -> impl Stream<Item = RawPduId> + Send + '_ {
 	self.search_pdu_ids_query_word(shortroomid, word)
-		.map(move |key| -> RawPduId {
-			let key = &key[prefix_len(word)..];
-			key.into()
+		.map(|key| -> RawPduId {
+			let start = key.len().saturating_sub(size_of::<RawPduId>());
+			key[start..].into()
 		})
 }
 
-/// Iterate over raw database results for a word
+/// Iterate over raw database results for words starting with `word`
 #[implement(Service)]
 fn search_pdu_ids_query_word(
 	&self,
 	shortroomid: ShortRoomId,
 	word: &str,
 ) -> impl Stream<Item = Val<'_>> + Send + '_ + use<'_> {
-	// rustc says const'ing this not yet stable
-	let end_id: RawPduId = PduId { shortroomid, count: PduCount::max() }.into();
+	// The prefix without the separator, so longer words starting with it match too.
+	let prefix = make_word_prefix(shortroomid, word);
 
-	// Newest pdus first
-	let end = make_tokenid(shortroomid, word, &end_id);
-	let prefix = make_prefix(shortroomid, word);
+	// Newest pdus first: keys end with the id, whose count ascends, and each word's
+	// range is scanned in reverse from just past its last key.
+	let mut end = prefix.clone();
+	end.push(u8::MAX);
+
 	self.db
 		.tokenids
 		.rev_raw_keys_from(&end)
@@ -225,22 +237,18 @@ fn tokenize(body: &str) -> impl Iterator<Item = String> + Send + '_ {
 		.map(str::to_lowercase)
 }
 
-fn make_tokenid(shortroomid: ShortRoomId, word: &str, pdu_id: &RawPduId) -> TokenId {
-	let mut key = make_prefix(shortroomid, word);
-	key.extend_from_slice(pdu_id.as_ref());
-	key
-}
 
 fn make_prefix(shortroomid: ShortRoomId, word: &str) -> TokenId {
-	let mut key = TokenId::new();
-	key.extend_from_slice(&shortroomid.to_be_bytes());
-	key.extend_from_slice(word.as_bytes());
+	let mut key = make_word_prefix(shortroomid, word);
 	key.push(tuwunel_database::SEP);
 	key
 }
 
-fn prefix_len(word: &str) -> usize {
-	size_of::<ShortRoomId>()
-		.saturating_add(word.len())
-		.saturating_add(1)
+/// The key prefix every word starting with `word` shares.
+fn make_word_prefix(shortroomid: ShortRoomId, word: &str) -> TokenId {
+	let mut key = TokenId::new();
+	key.extend_from_slice(&shortroomid.to_be_bytes());
+	key.extend_from_slice(word.as_bytes());
+	key
 }
+
