@@ -175,9 +175,16 @@ fn search_pdu_ids_query_words<'a>(
 	word: &'a str,
 ) -> impl Stream<Item = RawPduId> + Send + '_ {
 	self.search_pdu_ids_query_word(shortroomid, word)
-		.map(|key| -> RawPduId {
-			let start = key.len().saturating_sub(size_of::<RawPduId>());
-			key[start..].into()
+		.ready_filter_map(|key| {
+			// The id is whatever follows the word's separator; ids come in two lengths, so it
+			// cannot be taken as a fixed number of trailing bytes.
+			let room_len = size_of::<ShortRoomId>();
+			let sep = key
+				.get(room_len..)?
+				.iter()
+				.position(|byte| *byte == tuwunel_database::SEP)?;
+
+			Some(RawPduId::from(key.get(room_len.saturating_add(sep).saturating_add(1)..)?))
 		})
 }
 
