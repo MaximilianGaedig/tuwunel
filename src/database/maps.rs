@@ -570,6 +570,11 @@ pub(super) static MAPS: &[Descriptor] = &[
 		..descriptor::RANDOM_SMALL
 	},
 	Descriptor {
+		name: "roomwordgrams",
+		block_size: 512,
+		..descriptor::RANDOM
+	},
+	Descriptor {
 		name: "roommediaids",
 		block_size: 512,
 		..descriptor::RANDOM

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, pin::pin, sync::Arc};
 
 use futures::{Stream, StreamExt};
 use ruma::{RoomId, UserId, api::client::search::search_events::v3::Criteria};
@@ -24,6 +24,9 @@ pub struct Service {
 
 struct Data {
 	tokenids: Arc<Map>,
+	/// `shortroomid | trigram | SEP | word`: the words a room has used, by their three-letter
+	/// pieces, so a misspelt search term can be matched against them.
+	wordgrams: Arc<Map>,
 }
 
 #[derive(Clone, Debug)]
@@ -41,10 +44,20 @@ const TOKEN_ID_MAX_LEN: usize =
 	size_of::<ShortRoomId>() + WORD_MAX_LEN + 1 + size_of::<RawPduId>();
 const WORD_MAX_LEN: usize = 50;
 
+/// Fuzzy matching (see {@link Service::fuzzy_candidates}).
+const GRAM_LEN: usize = 3;
+const MIN_FUZZY_LEN: usize = GRAM_LEN;
+const SHORT_WORD_LEN: usize = 5;
+const MIN_SHARED_GRAMS: usize = 2;
+const MAX_FUZZY_CANDIDATES: usize = 8;
+
 impl crate::Service for Service {
 	fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
 		Ok(Arc::new(Self {
-			db: Data { tokenids: args.db["tokenids"].clone() },
+			db: Data {
+				tokenids: args.db["tokenids"].clone(),
+				wordgrams: args.db["roomwordgrams"].clone(),
+			},
 			services: args.services.clone(),
 		}))
 	}
@@ -54,6 +67,8 @@ impl crate::Service for Service {
 
 #[implement(Service)]
 pub fn index_pdu(&self, shortroomid: ShortRoomId, pdu_id: &RawPduId, message_body: &str) {
+	self.index_words(shortroomid, message_body);
+
 	let items = tokenize(message_body).map(|word| {
 		let mut key = shortroomid.to_be_bytes().to_vec();
 		key.extend_from_slice(word.as_bytes());
@@ -79,6 +94,72 @@ pub fn deindex_pdu(&self, shortroomid: ShortRoomId, pdu_id: &RawPduId, message_b
 	for token in batch {
 		self.db.tokenids.remove(&token);
 	}
+}
+
+/// Records a message's words by their three-letter pieces, so that a search term with a typo in it
+/// can still find them (see {@link fuzzy_candidates}). Words shorter than a trigram are skipped:
+/// those are already reachable by prefix.
+#[implement(Service)]
+fn index_words(&self, shortroomid: ShortRoomId, message_body: &str) {
+	let items = tokenize(message_body)
+		.filter(|word| word.len() >= MIN_FUZZY_LEN)
+		.flat_map(move |word| {
+			trigrams(&word)
+				.map(|gram| (make_gram_key(shortroomid, &gram, &word), []))
+				.collect::<Vec<_>>()
+		});
+
+	Txn::insert(&self.db.wordgrams, items).execute();
+}
+
+/// Words of this room close enough to `word` to be what the user meant: they share at least two
+/// three-letter pieces with it and are within an edit or two. Used only when nothing matched the
+/// term as typed, so an ordinary search never pays for it.
+#[implement(Service)]
+async fn fuzzy_candidates(&self, shortroomid: ShortRoomId, word: &str) -> Vec<String> {
+	if word.len() < MIN_FUZZY_LEN {
+		return Vec::new();
+	}
+
+	let mut shared: BTreeMap<String, usize> = BTreeMap::new();
+	for gram in trigrams(word) {
+		let prefix = make_gram_prefix(shortroomid, &gram);
+		let prefix_len = prefix.len();
+		let matches = prefix.clone();
+		let mut keys = pin!(
+			self.db
+				.wordgrams
+				.raw_keys_from(&prefix)
+				.ignore_err()
+				.ready_take_while(move |key| key.starts_with(&matches))
+		);
+
+		while let Some(key) = keys.next().await {
+			let Some(candidate) = key
+				.get(prefix_len..)
+				.and_then(|bytes| std::str::from_utf8(bytes).ok())
+			else {
+				continue;
+			};
+
+			*shared.entry(candidate.to_owned()).or_default() += 1;
+		}
+	}
+
+	let max_distance = if word.len() <= SHORT_WORD_LEN { 1 } else { 2 };
+	let mut candidates: Vec<_> = shared
+		.into_iter()
+		.filter(|(candidate, grams)| *grams >= MIN_SHARED_GRAMS && candidate.as_str() != word)
+		.filter(|(candidate, _)| within_distance(word, candidate, max_distance))
+		.collect();
+
+	// Closest first, and only a few: each one costs an index scan below.
+	candidates.sort_by_key(|(candidate, grams)| (usize::MAX - grams, candidate.len()));
+	candidates
+		.into_iter()
+		.take(MAX_FUZZY_CANDIDATES)
+		.map(|(candidate, _)| candidate)
+		.collect()
 }
 
 #[implement(Service)]
@@ -151,7 +232,18 @@ async fn search_pdu_ids_query_room(
 				.collect()
 				.await;
 
-			// Prefix matches arrive grouped by the word that matched; the terms are
+			// Nothing matched what was typed: try the room's words that are a typo away.
+			if ids.is_empty() {
+				for candidate in self.fuzzy_candidates(shortroomid, &word).await {
+					ids.extend(
+						self.search_pdu_ids_query_words(shortroomid, &candidate)
+							.collect::<Vec<_>>()
+							.await,
+					);
+				}
+			}
+
+			// Prefix and fuzzy matches arrive grouped by the word that matched; the terms are
 			// intersected below, which needs one order: newest first.
 			ids.sort_unstable_by(|a: &RawPduId, b: &RawPduId| b.as_ref().cmp(a.as_ref()));
 			ids.dedup();
@@ -198,10 +290,11 @@ fn search_pdu_ids_query_word(
 	// The prefix without the separator, so longer words starting with it match too.
 	let prefix = make_word_prefix(shortroomid, word);
 
-	// Newest pdus first: keys end with the id, whose count ascends, and each word's
-	// range is scanned in reverse from just past its last key.
+	// Newest pdus first, so the scan starts just past this prefix's last possible key: the
+	// separator and id that follow the word are all below 0xFF repeated. Seeking to the bare
+	// prefix instead would start *before* every key that has it and find nothing.
 	let mut end = prefix.clone();
-	end.push(u8::MAX);
+	end.extend_from_slice(&[u8::MAX; size_of::<RawPduId>() + 2]);
 
 	self.db
 		.tokenids
@@ -249,6 +342,54 @@ fn make_prefix(shortroomid: ShortRoomId, word: &str) -> TokenId {
 	let mut key = make_word_prefix(shortroomid, word);
 	key.push(tuwunel_database::SEP);
 	key
+}
+
+fn make_gram_key(shortroomid: ShortRoomId, gram: &str, word: &str) -> Vec<u8> {
+	let mut key = make_gram_prefix(shortroomid, gram);
+	key.extend_from_slice(word.as_bytes());
+	key
+}
+
+fn make_gram_prefix(shortroomid: ShortRoomId, gram: &str) -> Vec<u8> {
+	let mut key = Vec::with_capacity(size_of::<ShortRoomId>() + GRAM_LEN + 1);
+	key.extend_from_slice(&shortroomid.to_be_bytes());
+	key.extend_from_slice(gram.as_bytes());
+	key.push(tuwunel_database::SEP);
+	key
+}
+
+/// A word's overlapping three-letter pieces ("photo" -> pho, hot, oto).
+fn trigrams(word: &str) -> impl Iterator<Item = String> + '_ {
+	let chars: Vec<char> = word.chars().collect();
+	(0..chars.len().saturating_sub(GRAM_LEN.saturating_sub(1)))
+		.map(move |i| chars[i..i.saturating_add(GRAM_LEN)].iter().collect())
+}
+
+/// Whether two words are within `max` edits of each other (insert, delete or replace).
+fn within_distance(a: &str, b: &str, max: usize) -> bool {
+	let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+	if a.len().abs_diff(b.len()) > max {
+		return false;
+	}
+
+	let mut previous: Vec<usize> = (0..=b.len()).collect();
+	let mut current = vec![0_usize; b.len().saturating_add(1)];
+	for (i, ca) in a.iter().enumerate() {
+		current[0] = i.saturating_add(1);
+		for (j, cb) in b.iter().enumerate() {
+			let cost = usize::from(ca != cb);
+			current[j.saturating_add(1)] = previous[j]
+				.saturating_add(cost)
+				.min(previous[j.saturating_add(1)].saturating_add(1))
+				.min(current[j].saturating_add(1));
+		}
+		if current.iter().min().is_some_and(|best| *best > max) {
+			return false; // every way through this row is already too far
+		}
+		std::mem::swap(&mut previous, &mut current);
+	}
+
+	previous[b.len()] <= max
 }
 
 /// The key prefix every word starting with `word` shares.
