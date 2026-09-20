@@ -2996,6 +2996,18 @@ pub struct Config {
 	#[serde(default)]
 	pub media_allow_redirect: bool,
 
+	/// Server names whose media is fetched over plain HTTP from a service on
+	/// the local network instead of over federation. A bridge that serves its
+	/// media on demand ("direct media") is such a service: its mxc:// URIs name
+	/// a made-up server, and the bridge answers the federation media endpoints
+	/// itself, so nothing has to be stored until someone opens the file.
+	///
+	/// example: { "telegram-media.internal" = "mautrix-telegram:29317" }
+	///
+	/// default: {}
+	#[serde(default)]
+	pub http_federation_peers: BTreeMap<String, String>,
+
 	/// Vector list of regex patterns of server names that tuwunel will refuse
 	/// to download remote media from.
 	///

@@ -12,6 +12,8 @@ use super::DestString;
 pub enum FedDest {
 	Literal(SocketAddr),
 	Named(HostString, PortString),
+	/// A peer configured in `http_federation_peers`: reached over plain HTTP.
+	Plain(HostString, PortString),
 }
 
 /// FedDest::Named host domain
@@ -51,13 +53,15 @@ impl FedDest {
 		match self {
 			| Self::Literal(addr) => format!("https://{addr}").into(),
 			| Self::Named(host, port) => format!("https://{host}{port}").into(),
+			| Self::Plain(host, port) => format!("http://{host}{port}").into(),
 		}
 	}
 
 	pub(crate) fn uri_string(&self) -> DestString {
 		match self {
 			| Self::Literal(addr) => addr.to_string().into(),
-			| Self::Named(host, port) => [host.as_str(), port.as_str()].concat().into(),
+			| Self::Named(host, port) | Self::Plain(host, port) =>
+				[host.as_str(), port.as_str()].concat().into(),
 		}
 	}
 
@@ -65,7 +69,7 @@ impl FedDest {
 	pub(crate) fn hostname(&self) -> HostString {
 		match &self {
 			| Self::Literal(addr) => addr.ip().to_string().into(),
-			| Self::Named(host, _) => host.clone(),
+			| Self::Named(host, _) | Self::Plain(host, _) => host.clone(),
 		}
 	}
 
@@ -74,7 +78,7 @@ impl FedDest {
 	pub(crate) fn port(&self) -> Option<u16> {
 		match &self {
 			| Self::Literal(addr) => Some(addr.port()),
-			| Self::Named(_, port) => port[1..].parse().ok(),
+			| Self::Named(_, port) | Self::Plain(_, port) => port[1..].parse().ok(),
 		}
 	}
 
@@ -89,7 +93,8 @@ impl FedDest {
 	pub fn size(&self) -> usize {
 		match self {
 			| Self::Literal(saddr) => size_of_val(saddr),
-			| Self::Named(host, port) => host.len().expected_add(port.capacity()),
+			| Self::Named(host, port) | Self::Plain(host, port) =>
+				host.len().expected_add(port.capacity()),
 		}
 	}
 }

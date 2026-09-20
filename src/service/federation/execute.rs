@@ -224,9 +224,20 @@ where
 		.await
 }
 
+/// Whether `dest` is a service the operator listed in `http_federation_peers`.
+#[implement(super::Service)]
+fn is_local_peer(&self, dest: &ServerName) -> bool {
+	self.services
+		.server
+		.config
+		.http_federation_peers
+		.contains_key(dest.as_str())
+}
+
 #[implement(super::Service)]
 fn validate_request_destination(&self, dest: &ServerName) -> Result {
-	if !self.services.server.config.allow_federation {
+	// A configured plain-HTTP peer is a local service, not federation.
+	if !self.is_local_peer(dest) && !self.services.server.config.allow_federation {
 		return Err!(Config("allow_federation", "Federation is disabled."));
 	}
 
@@ -280,7 +291,10 @@ where
 {
 	let request = self.to_http_request::<T>(actual, dest, request)?;
 	let request = Request::try_from(request)?;
-	self.validate_url(request.url())?;
+	// The operator named a local peer on purpose; its address is meant to be private.
+	if !self.is_local_peer(dest) {
+		self.validate_url(request.url())?;
+	}
 	self.services.server.check_running()?;
 
 	Ok(request)

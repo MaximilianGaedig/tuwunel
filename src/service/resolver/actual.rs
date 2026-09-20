@@ -60,6 +60,27 @@ async fn lookup_actual_dest_with_policy(
 ) -> Result<(CachedDest, bool)> {
 	self.validate_self_destination(server_name, allow_self)?;
 
+	// A peer we were told to reach over plain HTTP (a bridge serving its own
+	// media on the local network) needs no lookup, and no cache entry.
+	if let Some(peer) = self
+		.services
+		.server
+		.config
+		.http_federation_peers
+		.get(server_name.as_str())
+	{
+		let (host, port) = peer.split_once(':').unwrap_or((peer.as_str(), "80"));
+		let port = PortString::from(&format!(":{port}")).unwrap_or_else(|_| FedDest::default_port());
+		return Ok((
+			CachedDest {
+				dest: FedDest::Plain(host.into(), port),
+				host: peer.as_str().into(),
+				expire: CachedDest::default_expire(),
+			},
+			true,
+		));
+	}
+
 	if let Ok(result) = self.cache.get_destination(server_name).await {
 		return Ok((result, true));
 	}
