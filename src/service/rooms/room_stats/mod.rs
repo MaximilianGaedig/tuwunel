@@ -8,7 +8,10 @@
 //! room's earliest and latest message times under `shortroomid | 2` and `| 3`.
 //! Encrypted rooms count as one class: the server cannot tell what they hold.
 
-use std::{pin::pin, sync::Arc};
+use std::{collections::BTreeMap, pin::pin, sync::Arc};
+
+use async_trait::async_trait;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use futures::StreamExt;
 use ruma::{
@@ -27,9 +30,22 @@ use crate::rooms::short::ShortRoomId;
 pub struct Service {
 	db: Data,
 	services: Arc<crate::services::OnceServices>,
-	/// Counters are read, changed and written back, so writers take turns.
-	write: std::sync::Mutex<()>,
+	/// Counting never happens on the path that stores a message: the change is queued and a worker
+	/// applies queued changes in batches.
+	queue: UnboundedSender<Update>,
+	inbox: std::sync::Mutex<Option<UnboundedReceiver<Update>>>,
 }
+
+struct Update {
+	shortroomid: ShortRoomId,
+	class: Class,
+	sender: String,
+	delta: i64,
+	ts: Option<u64>,
+}
+
+/// The most changes one pass applies, so one busy moment can't hold the worker for long.
+const BATCH_MAX: usize = 2000;
 
 struct Data {
 	roomstats: Arc<Map>,
@@ -111,13 +127,49 @@ const LAST: u8 = 3;
 /// Under this key, once the counters were rebuilt from the whole history.
 const READY_KEY: &[u8] = &[0xFF; 8];
 
+#[async_trait]
 impl crate::Service for Service {
 	fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
+		let (queue, inbox) = unbounded_channel();
 		Ok(Arc::new(Self {
 			db: Data { roomstats: args.db["roomstats"].clone() },
 			services: args.services.clone(),
-			write: std::sync::Mutex::new(()),
+			queue,
+			inbox: std::sync::Mutex::new(Some(inbox)),
 		}))
+	}
+
+	async fn worker(self: Arc<Self>) -> Result {
+		let Some(mut inbox) = self.inbox.lock().expect("locked").take() else {
+			return Ok(());
+		};
+
+		loop {
+			let mut batch = Vec::new();
+			tokio::select! {
+				received = inbox.recv() => match received {
+					| Some(update) => batch.push(update),
+					| None => return Ok(()),
+				},
+				() = self.services.server.until_shutdown() => {
+					while let Ok(update) = inbox.try_recv() {
+						batch.push(update);
+					}
+					self.apply(batch);
+					return Ok(());
+				},
+			}
+
+			while batch.len() < BATCH_MAX
+				&& let Ok(update) = inbox.try_recv()
+			{
+				batch.push(update);
+			}
+
+			// Reads and writes here are blocking database calls: keep them off the async threads.
+			let this = self.clone();
+			let _ = tokio::task::spawn_blocking(move || this.apply(batch)).await;
+		}
 	}
 
 	fn name(&self) -> &str { crate::service::make_name(std::module_path!()) }
@@ -168,22 +220,49 @@ pub fn uncount_json(&self, shortroomid: ShortRoomId, pdu: &CanonicalJsonObject) 
 
 #[implement(Service)]
 fn change(&self, shortroomid: ShortRoomId, class: Class, sender: &UserId, delta: i64, ts: Option<u64>) {
-	let _turn = self.write.lock().expect("locked");
+	// The receiver only goes away at shutdown, when there is nothing left to count for.
+	let _ = self.queue.send(Update {
+		shortroomid,
+		class,
+		sender: sender.to_string(),
+		delta,
+		ts,
+	});
+}
 
-	let key = count_key(shortroomid, class, sender.as_str());
-	let current = self
-		.db
-		.roomstats
-		.get_blocking(&key)
-		.ok()
-		.and_then(|value| <[u8; 8]>::try_from(value.as_ref()).ok())
-		.map_or(0, u64::from_be_bytes);
-	let next = current.saturating_add_signed(delta);
-	self.db.roomstats.insert(&key, next.to_be_bytes());
+/// Applies queued changes: every counter is read and written once for the whole batch.
+#[implement(Service)]
+fn apply(&self, batch: Vec<Update>) {
+	let mut deltas: BTreeMap<Vec<u8>, i64> = BTreeMap::new();
+	let mut spans: BTreeMap<ShortRoomId, (u64, u64)> = BTreeMap::new();
 
-	if let Some(ts) = ts {
-		self.widen(shortroomid, FIRST, ts, u64::min);
-		self.widen(shortroomid, LAST, ts, u64::max);
+	for update in batch {
+		let key = count_key(update.shortroomid, update.class, &update.sender);
+		*deltas.entry(key).or_default() += update.delta;
+
+		if let Some(ts) = update.ts {
+			let span = spans.entry(update.shortroomid).or_insert((ts, ts));
+			span.0 = span.0.min(ts);
+			span.1 = span.1.max(ts);
+		}
+	}
+
+	for (key, delta) in deltas {
+		let current = self
+			.db
+			.roomstats
+			.get_blocking(&key)
+			.ok()
+			.and_then(|value| <[u8; 8]>::try_from(value.as_ref()).ok())
+			.map_or(0, u64::from_be_bytes);
+		self.db
+			.roomstats
+			.insert(&key, current.saturating_add_signed(delta).to_be_bytes());
+	}
+
+	for (shortroomid, (first, last)) in spans {
+		self.widen(shortroomid, FIRST, first, u64::min);
+		self.widen(shortroomid, LAST, last, u64::max);
 	}
 }
 
