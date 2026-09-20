@@ -92,8 +92,10 @@ pub async fn backfill_if_required(&self, room_id: &RoomId, from: PduCount) -> Re
 
 	let mut eligible = self.backfill_candidates(room_id).await;
 
+	// A room only local users are in (every bridged room) has no other server to
+	// ask, and reaching the end of what a bridge imported is not a fault.
 	let no_backfill = || {
-		warn!(%room_id, "No servers could backfill, but backfill was needed");
+		debug!(%room_id, "No servers could backfill, but backfill was needed");
 		Ok(())
 	};
 
@@ -475,6 +477,10 @@ pub async fn backfill_pdu(
 	self.services
 		.media_index
 		.index_pdu(shortroomid, &pdu_id, &pdu);
+
+	self.services
+		.room_stats
+		.count_pdu(shortroomid, &pdu);
 
 	match pdu.kind {
 		| TimelineEventType::RoomMessage => {

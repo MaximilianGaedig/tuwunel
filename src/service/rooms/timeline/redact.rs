@@ -60,6 +60,10 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 		.media_index
 		.deindex_pdu(shortroomid, &pdu_id);
 
+	self.services
+		.room_stats
+		.uncount_json(shortroomid, &pdu);
+
 	let room_id: &RoomId = pdu.get("room_id").try_into()?;
 
 	let room_version_id = self

@@ -334,6 +334,14 @@ pub(super) enum DebugCommand {
 	///   the media, files, links, music and voice lists cover old history
 	RebuildMediaIndex,
 
+	/// - Index every room's existing words for typo-tolerant search, so a term
+	///   with a typo also finds old history
+	RebuildSearchWords,
+
+	/// - Count every room's existing messages per sender, for the message
+	///   counts shown in a room's details
+	RebuildRoomStats,
+
 	/// - Retrieves the saved original PDU before it has been redacted
 	GetRetainedPdu {
 		event_id: OwnedEventId,

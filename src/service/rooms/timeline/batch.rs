@@ -205,6 +205,10 @@ async fn prepend_batch(&self, room_id: &RoomId, events: Vec<BatchEvent>) -> Resu
 			.media_index
 			.index_pdu(shortroomid, &pdu_id, &pdu);
 
+		self.services
+			.room_stats
+			.count_pdu(shortroomid, &pdu);
+
 		self.index_text(shortroomid, &pdu_id, &pdu);
 	}
 

@@ -112,6 +112,50 @@ fn index_words(&self, shortroomid: ShortRoomId, message_body: &str) {
 	Txn::insert(&self.db.wordgrams, items).execute();
 }
 
+/// Records the words of every room's existing messages for typo-tolerant search:
+/// for history that predates it. The exact-word index already covers old
+/// messages, so only the three-letter pieces are written.
+#[implement(Service)]
+pub async fn rebuild_words(&self) -> Result<usize> {
+	#[derive(serde::Deserialize)]
+	struct Body {
+		body: Option<String>,
+	}
+
+	let rooms: Vec<_> = self
+		.services
+		.metadata
+		.iter_ids()
+		.map(ToOwned::to_owned)
+		.collect()
+		.await;
+
+	let mut indexed: usize = 0;
+	for room_id in rooms {
+		let Ok(shortroomid) = self.services.short.get_shortroomid(&room_id).await else {
+			continue;
+		};
+
+		let mut pdus = pin!(
+			self.services
+				.timeline
+				.pdus(None, &room_id, None)
+				.ignore_err()
+		);
+		while let Some((_, pdu)) = pdus.next().await {
+			if *pdu.event_type() != ruma::events::TimelineEventType::RoomMessage {
+				continue;
+			}
+			if let Ok(Body { body: Some(body) }) = pdu.get_content() {
+				self.index_words(shortroomid, &body);
+				indexed = indexed.saturating_add(1);
+			}
+		}
+	}
+
+	Ok(indexed)
+}
+
 /// Words of this room close enough to `word` to be what the user meant: they share at least two
 /// three-letter pieces with it and are within an edit or two. Used only when nothing matched the
 /// term as typed, so an ordinary search never pays for it.

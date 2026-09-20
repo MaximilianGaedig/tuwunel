@@ -8,6 +8,7 @@ pub mod media_index;
 pub mod metadata;
 pub mod pdu_metadata;
 pub mod read_receipt;
+pub mod room_stats;
 pub mod retention;
 pub mod search;
 pub mod short;

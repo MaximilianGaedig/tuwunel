@@ -89,6 +89,10 @@ pub async fn purge_history(
 				.deindex_pdu(shortroomid, &raw_id);
 
 			self.services
+				.room_stats
+				.uncount_pdu(shortroomid, &pdu);
+
+			self.services
 				.pdu_metadata
 				.purge_event_relations(shortroomid, count, room_id, &event_id)
 				.await;
