@@ -10,7 +10,7 @@ use ruma::{
 use serde::{Deserialize, Serialize};
 use tuwunel_core::{Result, utils::math::usize_from_ruma_bounded};
 
-use super::room_stats::Storage;
+use super::room_stats::{MonthCount, Storage};
 use crate::Ruma;
 
 
@@ -58,6 +58,10 @@ pub struct Response {
 	pub account: Storage,
 	/// Only for a server admin.
 	pub server: Option<ServerStorage>,
+
+	/// When all of the account's messages were sent: per month, and per hour of the week in UTC.
+	pub by_month: Vec<MonthCount>,
+	pub by_hour_of_week: Vec<u64>,
 }
 
 /// The directory sizes are a walk of the disk, so they are measured at most this often.
@@ -108,6 +112,8 @@ pub(crate) async fn get_storage_route(
 		.await;
 
 	let mut account = Storage::default();
+	let mut months: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
+	let mut hours = vec![0_u64; 168];
 	let mut rooms = Vec::with_capacity(room_ids.len());
 	for room_id in &room_ids {
 		let Ok(shortroomid) = services.short.get_shortroomid(room_id).await else {
@@ -115,6 +121,12 @@ pub(crate) async fn get_storage_route(
 		};
 		let stats = services.room_stats.stats(shortroomid).await;
 		let messages: u64 = stats.counts.iter().map(|c| c.count).sum();
+		for (ym, count) in &stats.months {
+			*months.entry(*ym).or_default() += count;
+		}
+		for (slot, count) in hours.iter_mut().zip(&stats.hours) {
+			*slot += count;
+		}
 		let storage = Storage {
 			events: stats.bytes.event,
 			media_stored: stats.bytes.media_stored,
@@ -172,5 +184,15 @@ pub(crate) async fn get_storage_route(
 		None
 	};
 
-	Ok(Response { rooms: listed, room_count, account, server })
+	Ok(Response {
+		rooms: listed,
+		room_count,
+		account,
+		server,
+		by_month: months
+			.iter()
+			.map(|(ym, count)| MonthCount { month: format!("{:04}-{:02}", ym / 100, ym % 100), count: *count })
+			.collect(),
+		by_hour_of_week: hours,
+	})
 }
