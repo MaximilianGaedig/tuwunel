@@ -43,8 +43,22 @@ pub struct SenderStats {
 	pub by_kind: BTreeMap<String, u64>,
 }
 
+/// What a chat takes up on this server, in bytes.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct Storage {
+	/// The messages themselves (text, JSON, ids and signatures, roughly).
+	pub events: u64,
+	/// Pictures, videos and files kept on this server.
+	pub media_stored: u64,
+	/// Files a bridge serves from its network when opened: not stored here until someone views them.
+	pub media_on_demand: u64,
+}
+
 #[response]
 pub struct Response {
+	/// What this chat takes up here.
+	pub storage: Storage,
+
 	/// All counted messages.
 	pub total: u64,
 
@@ -114,6 +128,11 @@ pub(crate) async fn get_room_stats_route(
 	senders.truncate(limit);
 
 	Ok(Response {
+		storage: Storage {
+			events: stats.bytes.event,
+			media_stored: stats.bytes.media_stored,
+			media_on_demand: stats.bytes.media_on_demand,
+		},
 		total,
 		by_kind,
 		senders,

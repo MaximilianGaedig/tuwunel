@@ -42,6 +42,16 @@ struct Update {
 	sender: String,
 	delta: i64,
 	ts: Option<u64>,
+	bytes: Bytes,
+}
+
+/// What a message takes up: its own text and JSON, and the file it points at, stored here or served on
+/// demand from the bridge's network (not stored at all until someone opens it).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Bytes {
+	pub event: u64,
+	pub media_stored: u64,
+	pub media_on_demand: u64,
 }
 
 /// The most changes one pass applies, so one busy moment can't hold the worker for long.
@@ -104,6 +114,7 @@ pub struct SenderCount {
 }
 
 pub struct Stats {
+	pub bytes: Bytes,
 	pub counts: Vec<SenderCount>,
 	pub first_ts: Option<u64>,
 	pub last_ts: Option<u64>,
@@ -114,12 +125,28 @@ pub struct Stats {
 
 #[derive(Deserialize)]
 struct MessageContent {
+	url: Option<String>,
+	file: Option<FileContent>,
+	info: Option<MediaInfo>,
 	msgtype: Option<String>,
 	#[serde(rename = "org.matrix.msc3245.voice")]
 	msc3245_voice: Option<serde_json::Value>,
 	#[serde(rename = "org.matrix.msc2516.voice")]
 	msc2516_voice: Option<serde_json::Value>,
 }
+
+#[derive(Deserialize)]
+struct FileContent {
+	url: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MediaInfo {
+	size: Option<u64>,
+}
+
+/// Counters `shortroomid | 4 | which`: bytes of events, of stored media, of on-demand media.
+const BYTES: u8 = 4;
 
 const COUNTS: u8 = 1;
 const FIRST: u8 = 2;
@@ -183,14 +210,20 @@ pub fn count_pdu<E: Event>(&self, shortroomid: ShortRoomId, pdu: &E) {
 	};
 
 	let ts = u64::from(pdu.origin_server_ts().get());
-	self.change(shortroomid, class, pdu.sender(), 1, Some(ts));
+	let content = pdu.get_content::<MessageContent>().ok();
+	let mut bytes = self.bytes_of(pdu.content().get().len(), content.as_ref());
+	bytes.event = bytes.event.saturating_add(EVENT_OVERHEAD);
+	self.change(shortroomid, class, pdu.sender(), 1, Some(ts), bytes);
 }
 
 /// Takes a purged message off its counter.
 #[implement(Service)]
 pub fn uncount_pdu<E: Event>(&self, shortroomid: ShortRoomId, pdu: &E) {
-	if let Some(class) = class_of(pdu.kind(), pdu.get_content::<MessageContent>().ok().as_ref()) {
-		self.change(shortroomid, class, pdu.sender(), -1, None);
+	let content = pdu.get_content::<MessageContent>().ok();
+	if let Some(class) = class_of(pdu.kind(), content.as_ref()) {
+		let mut bytes = self.bytes_of(pdu.content().get().len(), content.as_ref());
+		bytes.event = bytes.event.saturating_add(EVENT_OVERHEAD);
+		self.change(shortroomid, class, pdu.sender(), -1, None, bytes);
 	}
 }
 
@@ -204,22 +237,25 @@ pub fn uncount_json(&self, shortroomid: ShortRoomId, pdu: &CanonicalJsonObject) 
 		return;
 	};
 
-	let content = pdu
+	let content_value = pdu
 		.get("content")
-		.and_then(|content| serde_json::to_value(content).ok())
-		.and_then(|content| serde_json::from_value::<MessageContent>(content).ok());
+		.and_then(|content| serde_json::to_value(content).ok());
+	let event_len = content_value.as_ref().map_or(0, |v| v.to_string().len());
+	let content = content_value.and_then(|content| serde_json::from_value::<MessageContent>(content).ok());
 
 	let kind = TimelineEventType::from(kind.as_str());
 	let Some(class) = class_of(&kind, content.as_ref()) else {
 		return;
 	};
 	if let Ok(sender) = <&UserId>::try_from(sender.as_str()) {
-		self.change(shortroomid, class, sender, -1, None);
+		let mut bytes = self.bytes_of(event_len, content.as_ref());
+		bytes.event = bytes.event.saturating_add(EVENT_OVERHEAD);
+		self.change(shortroomid, class, sender, -1, None, bytes);
 	}
 }
 
 #[implement(Service)]
-fn change(&self, shortroomid: ShortRoomId, class: Class, sender: &UserId, delta: i64, ts: Option<u64>) {
+fn change(&self, shortroomid: ShortRoomId, class: Class, sender: &UserId, delta: i64, ts: Option<u64>, bytes: Bytes) {
 	// The receiver only goes away at shutdown, when there is nothing left to count for.
 	let _ = self.queue.send(Update {
 		shortroomid,
@@ -227,7 +263,42 @@ fn change(&self, shortroomid: ShortRoomId, class: Class, sender: &UserId, delta:
 		sender: sender.to_string(),
 		delta,
 		ts,
+		bytes,
 	});
+}
+
+/// A rough size for each event beyond its content: ids, hashes, signatures and keys.
+const EVENT_OVERHEAD: u64 = 500;
+
+/// Sizes a message: its content, and the file it points at (stored here, or not stored: an mxc URL
+/// whose server isn't this one is served on demand by a bridge).
+#[implement(Service)]
+fn bytes_of(&self, content_len: usize, content: Option<&MessageContent>) -> Bytes {
+	let mut bytes = Bytes { event: content_len as u64, ..Bytes::default() };
+	let Some(content) = content else {
+		return bytes;
+	};
+
+	let size = content.info.as_ref().and_then(|info| info.size).unwrap_or(0);
+	let url = content
+		.url
+		.as_deref()
+		.or_else(|| content.file.as_ref().and_then(|f| f.url.as_deref()));
+	let Some(url) = url else {
+		return bytes;
+	};
+
+	let ours = url
+		.strip_prefix("mxc://")
+		.and_then(|rest| rest.split('/').next())
+		.is_some_and(|server| server == self.services.globals.server_name().as_str());
+	if ours {
+		bytes.media_stored = size;
+	} else {
+		bytes.media_on_demand = size;
+	}
+
+	bytes
 }
 
 /// Applies queued changes: every counter is read and written once for the whole batch.
@@ -235,8 +306,18 @@ fn change(&self, shortroomid: ShortRoomId, class: Class, sender: &UserId, delta:
 fn apply(&self, batch: Vec<Update>) {
 	let mut deltas: BTreeMap<Vec<u8>, i64> = BTreeMap::new();
 	let mut spans: BTreeMap<ShortRoomId, (u64, u64)> = BTreeMap::new();
+	let mut bytes: BTreeMap<(ShortRoomId, u8), i64> = BTreeMap::new();
 
 	for update in batch {
+		for (which, amount) in [
+			(1_u8, update.bytes.event),
+			(2, update.bytes.media_stored),
+			(3, update.bytes.media_on_demand),
+		] {
+			let amount = i64::try_from(amount).unwrap_or(i64::MAX);
+			*bytes.entry((update.shortroomid, which)).or_default() += update.delta.saturating_mul(amount);
+		}
+
 		let key = count_key(update.shortroomid, update.class, &update.sender);
 		*deltas.entry(key).or_default() += update.delta;
 
@@ -248,6 +329,22 @@ fn apply(&self, batch: Vec<Update>) {
 	}
 
 	for (key, delta) in deltas {
+		let current = self
+			.db
+			.roomstats
+			.get_blocking(&key)
+			.ok()
+			.and_then(|value| <[u8; 8]>::try_from(value.as_ref()).ok())
+			.map_or(0, u64::from_be_bytes);
+		self.db
+			.roomstats
+			.insert(&key, current.saturating_add_signed(delta).to_be_bytes());
+	}
+
+	for ((shortroomid, which), delta) in bytes {
+		let mut key = shortroomid.to_be_bytes().to_vec();
+		key.push(BYTES);
+		key.push(which);
 		let current = self
 			.db
 			.roomstats
@@ -323,7 +420,24 @@ pub async fn stats(&self, shortroomid: ShortRoomId) -> Stats {
 			.map(u64::from_be_bytes)
 	};
 
+	let read_bytes = |which: u8| {
+		let mut key = shortroomid.to_be_bytes().to_vec();
+		key.push(BYTES);
+		key.push(which);
+		self.db
+			.roomstats
+			.get_blocking(&key)
+			.ok()
+			.and_then(|value| <[u8; 8]>::try_from(value.as_ref()).ok())
+			.map_or(0, u64::from_be_bytes)
+	};
+
 	Stats {
+		bytes: Bytes {
+			event: read_bytes(1),
+			media_stored: read_bytes(2),
+			media_on_demand: read_bytes(3),
+		},
 		counts,
 		first_ts: read(FIRST),
 		last_ts: read(LAST),

@@ -81,11 +81,13 @@ static VERSIONS: [&str; 27] = [
 	"v1.19",  /* mutual rooms (MSC2666) */
 ];
 
-static UNSTABLE_FEATURES: [&str; 43] = [
+static UNSTABLE_FEATURES: [&str; 44] = [
 	// a room's media, files, links, music and voice lists, from an index
 	"im.mxg.media_index",
 	// per-room message counts, by kind and by sender
 	"im.mxg.room_stats",
+	// what chats, the account and the server take up
+	"im.mxg.storage",
 	// bridges importing a chat's history, before or after what a room has
 	"com.beeper.batch_sending",
 	"org.matrix.e2e_cross_signing",
