@@ -84,16 +84,29 @@ pub(crate) async fn batch_send_route(
 		return Err!(Request(NotFound("Unknown room.")));
 	}
 
-	// The bridge speaks for its own users and its bot, not for anyone else.
-	if let Some(event) = body
-		.events
-		.iter()
-		.find(|event| !appservice.is_user_match(&event.sender))
-	{
-		return Err!(Request(Forbidden(
-			"The application service does not control {}.",
-			event.sender
-		)));
+	// The bridge speaks for its own users and its bot, and for people of this server who are in the
+	// room: a bridge already acts as its owner through double puppeting, and the owner's own
+	// messages are part of the history it is importing.
+	for event in &body.events {
+		if appservice.is_user_match(&event.sender) {
+			continue;
+		}
+
+		let member = services.globals.user_is_local(&event.sender)
+			&& (services
+				.state_cache
+				.is_joined(&event.sender, &body.room_id)
+				.await || services
+				.state_cache
+				.once_joined(&event.sender, &body.room_id)
+				.await);
+
+		if !member {
+			return Err!(Request(Forbidden(
+				"The application service may not import messages from {}.",
+				event.sender
+			)));
+		}
 	}
 
 	let events = body
