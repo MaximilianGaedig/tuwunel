@@ -60,6 +60,12 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 		.media_index
 		.deindex_pdu(shortroomid, &pdu_id);
 
+	// And what its media said, which was indexed as if it were the message's own words.
+	self.services
+		.media_text
+		.deindex_pdu(shortroomid, &pdu_id)
+		.await;
+
 	self.services
 		.room_stats
 		.uncount_json(shortroomid, &pdu);

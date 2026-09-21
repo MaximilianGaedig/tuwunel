@@ -435,6 +435,9 @@ fn register_client_media_and_device_routes(
 fn register_client_media_index_routes(router: Router<State>) -> Router<State> {
 	router
 		.ruma_route(&client::get_room_media_route)
+		.ruma_route(&client::put_media_text_route)
+		.ruma_route(&client::get_media_text_route)
+		.ruma_route(&client::get_missing_media_text_route)
 		.ruma_route(&client::batch_send_route)
 		.ruma_route(&client::get_room_stats_route)
 		.ruma_route(&client::get_storage_route)
