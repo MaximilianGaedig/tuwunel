@@ -114,11 +114,19 @@ pub fn index_pdu<E: Event>(&self, shortroomid: ShortRoomId, pdu_id: &RawPduId, p
 		return;
 	}
 
+	let ts = origin_ts(pdu);
 	let items = kinds
 		.into_iter()
-		.map(|kind| (make_key(shortroomid, kind, pdu_id), []));
+		.map(|kind| (make_key(shortroomid, kind, pdu_id), ts));
 
 	Txn::insert(&self.db.mediaids, items).execute();
+}
+
+/// The event's own time, stored beside its id so the index can be read by date without opening a
+/// single event: a client's media scrubber needs a count per month and a place to start from, and
+/// both would otherwise cost one fetch per item.
+fn origin_ts<E: Event>(pdu: &E) -> [u8; 8] {
+	u64::from(pdu.origin_server_ts().0).to_be_bytes()
 }
 
 /// Removes an event from the index (it was redacted or purged). Its content may
@@ -138,6 +146,29 @@ pub fn deindex_pdu(&self, shortroomid: ShortRoomId, pdu_id: &RawPduId) {
 	}
 }
 
+/// A room's media of one kind, newest first, with each event's time where the index knows it.
+///
+/// The time is missing only for rows written before it was stored; `rebuild_room` fills them in.
+#[implement(Service)]
+pub fn media_entries<'a>(
+	&'a self,
+	shortroomid: ShortRoomId,
+	kind: MediaKind,
+	until: Option<PduCount>,
+) -> impl Stream<Item = (RawPduId, Option<u64>)> + Send + 'a {
+	let until_id: RawPduId =
+		PduId { shortroomid, count: until.unwrap_or_else(PduCount::max) }.into();
+	let end = make_key(shortroomid, kind, &until_id);
+	let prefix = make_prefix(shortroomid, kind);
+
+	self.db
+		.mediaids
+		.rev_raw_stream_from(&end)
+		.ignore_err()
+		.ready_take_while(move |(key, _): &(&[u8], &[u8])| key.starts_with(&prefix))
+		.map(|(key, val)| (RawPduId::from(&key[prefix_len()..]), read_ts(val)))
+}
+
 /// A room's media of one kind, newest first. `until` continues a previous page.
 #[implement(Service)]
 pub fn media_ids<'a>(
@@ -146,17 +177,12 @@ pub fn media_ids<'a>(
 	kind: MediaKind,
 	until: Option<PduCount>,
 ) -> impl Stream<Item = RawPduId> + Send + 'a {
-	let until_id: RawPduId =
-		PduId { shortroomid, count: until.unwrap_or_else(PduCount::max) }.into();
-	let end = make_key(shortroomid, kind, &until_id);
-	let prefix = make_prefix(shortroomid, kind);
+	self.media_entries(shortroomid, kind, until)
+		.map(|(pdu_id, _)| pdu_id)
+}
 
-	self.db
-		.mediaids
-		.rev_raw_keys_from(&end)
-		.ignore_err()
-		.ready_take_while(move |key| key.starts_with(&prefix))
-		.map(|key| RawPduId::from(&key[prefix_len()..]))
+fn read_ts(val: &[u8]) -> Option<u64> {
+	val.try_into().ok().map(u64::from_be_bytes)
 }
 
 /// Indexes every room's existing messages: for history that predates the index.
@@ -207,9 +233,10 @@ pub async fn rebuild_room(&self, room_id: &RoomId) -> Result<usize> {
 			continue;
 		}
 		indexed = indexed.saturating_add(1);
+		let ts = origin_ts(&pdu);
 		let items = kinds
 			.into_iter()
-			.map(|kind| (make_key(shortroomid, kind, &pdu_id), []));
+			.map(|kind| (make_key(shortroomid, kind, &pdu_id), ts));
 		Txn::insert(&self.db.mediaids, items).execute();
 	}
 
