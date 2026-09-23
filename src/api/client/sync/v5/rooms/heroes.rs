@@ -18,10 +18,15 @@ pub(super) async fn calculate_heroes(
 	room_name: Option<&DisplayName>,
 	room_avatar: Option<&MxcUri>,
 ) -> (Option<Heroes>, Option<DisplayName>, Option<OwnedMxcUri>) {
+	// MSC4171: the bridge's bot and the reader's own puppet are in the room but are not people in
+	// the conversation, and this is the path that turns heroes into the name a client shows.
+	let services_members = crate::client::sync::service_members(services, room_id).await;
+
 	let heroes: Heroes = services
 		.state_cache
 		.room_members(room_id)
 		.ready_filter(|&member| member != sender_user)
+		.ready_filter(|&member| !services_members.contains(member))
 		.ready_filter_map(|member| room_name.is_none().then_some(member))
 		.map(ToOwned::to_owned)
 		.broadn_filter_map(MAX_HEROES, async |user_id| {

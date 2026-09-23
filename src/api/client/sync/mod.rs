@@ -4,15 +4,18 @@ mod tests;
 mod v3;
 mod v5;
 
+use std::collections::HashSet;
+
 use futures::{StreamExt, pin_mut};
 use ruma::{
 	OwnedUserId, RoomId, UserId,
 	events::{
-		AnyStrippedStateEvent,
+		AnyStrippedStateEvent, StateEventType,
 		TimelineEventType::{RoomCreate, RoomMember},
 	},
 	serde::Raw,
 };
+use serde::Deserialize;
 use tuwunel_core::{
 	Error, PduCount, Result, debug_warn, is_equal_to,
 	matrix::{Event, pdu::PduEvent},
@@ -24,6 +27,47 @@ pub(crate) use self::{
 	v3::{calculate_heroes, sync_events_route},
 	v5::sync_events_v5_route,
 };
+
+/// MSC4171: the members a room has declared to be services rather than people.
+///
+/// A bridged direct message holds more than two members: the bridge's bot, and the puppet of the
+/// reader's own account on the other network. Left in the heroes, they become the room's name for
+/// every client that has no name to show - "Signal bridge bot and 2 others" for a conversation with
+/// one person - and they make a chat of two look like a group of four.
+///
+/// The room says which of its members are these, in `io.element.functional_members`. Honouring it
+/// here rather than in a client fixes it once for every client, which is the whole point: the
+/// bridge bot is not a person in the conversation whichever app you read it in.
+const FUNCTIONAL_MEMBERS: &str = "io.element.functional_members";
+
+#[derive(Deserialize)]
+struct FunctionalMembers {
+	#[serde(default)]
+	service_members: Vec<String>,
+}
+
+/// The room's service members, or none where it declares none.
+///
+/// Read as strings and parsed one by one: this is unvalidated content from whoever set the state,
+/// and one malformed id in the list must not throw away the rest of it.
+pub(crate) async fn service_members(services: &Services, room_id: &RoomId) -> HashSet<OwnedUserId> {
+	services
+		.state_accessor
+		.room_state_get_content::<FunctionalMembers>(
+			room_id,
+			&StateEventType::from(FUNCTIONAL_MEMBERS),
+			"",
+		)
+		.await
+		.map(|content| {
+			content
+				.service_members
+				.into_iter()
+				.filter_map(|id| OwnedUserId::try_from(id).ok())
+				.collect()
+		})
+		.unwrap_or_default()
+}
 
 #[derive(Clone, Copy)]
 enum TimelineErrors {

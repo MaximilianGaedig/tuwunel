@@ -2392,11 +2392,14 @@ pub(crate) async fn calculate_heroes(
 ) -> Vec<OwnedUserId> {
 	const LIMIT: usize = 5;
 
+	// Read once for the room, not once per member (MSC4171; see sync::service_members).
+	let services_members = super::service_members(services, room_id).await;
+
 	services
 		.state_accessor
 		.room_state_type_pdus(room_id, &StateEventType::RoomMember)
 		.ready_filter_map(Result::ok)
-		.filter_map(|pdu| filter_hero(services, room_id, sender_user, pdu))
+		.filter_map(|pdu| filter_hero(services, room_id, sender_user, &services_members, pdu))
 		.take(LIMIT)
 		.collect::<Vec<_>>()
 		.await
@@ -2406,11 +2409,18 @@ async fn filter_hero<Pdu: Event>(
 	services: &Services,
 	room_id: &RoomId,
 	sender_user: &UserId,
+	services_members: &HashSet<OwnedUserId>,
 	pdu: Pdu,
 ) -> Option<OwnedUserId> {
-	let user_id = pdu.state_key().map(TryInto::try_into).flat_ok()?;
+	let user_id: &UserId = pdu.state_key().map(TryInto::try_into).flat_ok()?;
 
 	if user_id == sender_user {
+		return None;
+	}
+
+	// A bridge's bot, or the reader's own puppet on the bridged network: in the room, but not one of
+	// the people in the conversation, so never part of what the room is called.
+	if services_members.contains(user_id) {
 		return None;
 	}
 
