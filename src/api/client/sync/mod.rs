@@ -46,12 +46,46 @@ struct FunctionalMembers {
 	service_members: Vec<String>,
 }
 
-/// The room's service members, or none where it declares none.
+/// The bot a bridge declares as its own, for the rooms that declare no service members at all.
+///
+/// A bridge writes `m.bridge` (MSC2346) naming the bot it speaks through. That is the same fact
+/// MSC4171 carries, from the same source, and it is already in the room - so a bridge that never got
+/// round to writing the newer event still tells us which of its members is machinery.
+///
+/// This is not a guess about who looks like a bot: it is the bridge's own statement about itself. It
+/// matters because the bridges that most need it are the ones least likely to be updated - the legacy
+/// ones - and because a room whose state was written before a bridge learned to declare its services
+/// is never revisited.
+async fn bridge_bots(services: &Services, room_id: &RoomId) -> HashSet<OwnedUserId> {
+	#[derive(Deserialize)]
+	struct BridgeInfo {
+		bridgebot: Option<OwnedUserId>,
+	}
+
+	let mut bots = HashSet::new();
+	for event_type in [StateEventType::from("m.bridge"), StateEventType::from("uk.half-shot.bridge")] {
+		let mut pdus = services
+			.state_accessor
+			.room_state_type_pdus(room_id, &event_type)
+			.ready_filter_map(Result::ok)
+			.boxed();
+
+		while let Some(pdu) = pdus.next().await {
+			// One per network: a room can be bridged to more than one at a time.
+			if let Ok(info) = pdu.get_content::<BridgeInfo>() {
+				bots.extend(info.bridgebot);
+			}
+		}
+	}
+	bots
+}
+
+/// The room's service members: what it declares, and the bridge bots it names.
 ///
 /// Read as strings and parsed one by one: this is unvalidated content from whoever set the state,
 /// and one malformed id in the list must not throw away the rest of it.
 pub(crate) async fn service_members(services: &Services, room_id: &RoomId) -> HashSet<OwnedUserId> {
-	services
+	let declared: HashSet<OwnedUserId> = services
 		.state_accessor
 		.room_state_get_content::<FunctionalMembers>(
 			room_id,
@@ -66,7 +100,13 @@ pub(crate) async fn service_members(services: &Services, room_id: &RoomId) -> Ha
 				.filter_map(|id| OwnedUserId::try_from(id).ok())
 				.collect()
 		})
-		.unwrap_or_default()
+		.unwrap_or_default();
+
+	// Both, always: a room may declare its own puppet as a service member while the bridge that
+	// wrote it predates declaring the bot, and neither list is authoritative over the other.
+	let mut all = declared;
+	all.extend(bridge_bots(services, room_id).await);
+	all
 }
 
 #[derive(Clone, Copy)]
