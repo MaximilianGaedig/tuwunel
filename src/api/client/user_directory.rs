@@ -1,7 +1,9 @@
+use std::collections::HashSet;
+
 use axum::extract::State;
 use futures::{FutureExt, StreamExt, pin_mut};
 use ruma::{
-	UserId,
+	OwnedUserId, UserId,
 	api::client::user_directory::search_users::v3::{Request, Response, User},
 	events::room::join_rules::JoinRule,
 };
@@ -30,6 +32,10 @@ const LIMIT_DEFAULT: usize = 10;
 ///   unless `show_all_local_users_in_user_directory` is enabled
 /// - Hides appservice senders and users in exclusive appservice user namespaces
 ///   unless `show_appservice_users_in_user_directory` is enabled
+/// - Asks the appservices about their own networks as well, so a bridged person who has no puppet
+///   here yet can still be found (see appservice::Service::search_users). Answering creates the
+///   puppet, so the result is an ordinary user and every client benefits without knowing any of
+///   this.
 pub(crate) async fn search_users_route(
 	State(services): State<crate::State>,
 	body: Ruma<Request>,
@@ -61,8 +67,37 @@ pub(crate) async fn search_users_route(
 		});
 
 	pin_mut!(users);
-	let results = users.by_ref().take(limit).collect().await;
-	let limited = users.next().await.is_some();
+	let mut results: Vec<User> = users.by_ref().take(limit).collect().await;
+	let mut limited = users.next().await.is_some();
+
+	/*
+	 * What is already here first, then what the networks say.
+	 *
+	 * Someone this server knows about is someone with a history worth putting at the top, and the
+	 * bridges are asked for the rest. A person who is both - already bridged - comes back from both
+	 * and is kept once.
+	 */
+	if results.len() < limit {
+		let known: HashSet<OwnedUserId> = results
+			.iter()
+			.map(|user| user.user_id.clone())
+			.collect();
+
+		let bridged = services
+			.appservice
+			.search_users(sender_user, &search_term, limit)
+			.await;
+
+		for user in bridged {
+			if results.len() >= limit {
+				limited = true;
+				break;
+			}
+			if !known.contains(&user.user_id) {
+				results.push(user);
+			}
+		}
+	}
 
 	Ok(Response { results, limited })
 }

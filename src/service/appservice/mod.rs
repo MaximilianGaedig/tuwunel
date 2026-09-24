@@ -4,6 +4,7 @@ mod ping;
 mod registration_info;
 pub(crate) mod request;
 mod thirdparty;
+mod user_directory;
 
 use std::{
 	collections::BTreeMap,
