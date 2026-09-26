@@ -36,7 +36,8 @@ const RANK_WINDOW: usize = 20;
 /// - Hides appservice senders and users in exclusive appservice user namespaces
 ///   unless `show_appservice_users_in_user_directory` is enabled
 /// - Asks the appservices about their own networks as well, so a bridged person who has no puppet
-///   here yet can still be found (see appservice::Service::search_users). Answering creates the
+///   here yet can still be found (see appservice::Service::search_users), and ranks what they say
+///   together with the local users rather than after them. Answering creates the
 ///   puppet, so the result is an ordinary user and every client benefits without knowing any of
 ///   this.
 pub(crate) async fn search_users_route(
@@ -97,53 +98,72 @@ pub(crate) async fn search_users_route(
 	 */
 	let ceiling = limit.saturating_mul(RANK_WINDOW).min(LIMIT_MAX);
 	pin_mut!(users);
-	let mut scored: Vec<(u32, User)> = users.by_ref().take(ceiling).collect().await;
-	let mut limited = users.next().await.is_some() || scored.len() > limit;
+	let mut scored: Vec<(u32, bool, User)> = users
+		.by_ref()
+		.take(ceiling)
+		.map(|(score, user)| (score, false, user))
+		.collect()
+		.await;
+	let mut limited = users.next().await.is_some();
 
-	// Best first, and a stable tie-break so the same search twice gives the same answer.
-	scored.sort_by(|(left, left_user), (right, right_user)| {
+	/*
+	 * What this server knows and what the networks know, ranked together.
+	 *
+	 * A bridged person is unknown here until they have a puppet, which happens the first time
+	 * somebody talks to them - so searching only what is already here answers "who have I already
+	 * spoken to?", and the person being looked for is missing until it is too late to be useful.
+	 * The bridges can answer about their own networks, and answering creates the puppet, so what
+	 * comes back is an ordinary user any client can open a chat with.
+	 *
+	 * The networks are asked whichever way the local search went, and the two are then ranked as
+	 * one list rather than local-first-then-the-rest. Concatenating, as this did at first, means
+	 * the person being looked for falls off the end precisely when the server happens to know a
+	 * page full of others whose names also match - which is the same failure one level down.
+	 */
+	let known: HashSet<OwnedUserId> = scored
+		.iter()
+		.map(|(_, _, user)| user.user_id.clone())
+		.collect();
+
+	scored.extend(
+		services
+			.appservice
+			.search_users(sender_user, &search_term, limit)
+			.await
+			.into_iter()
+			.filter(|user| !known.contains(&user.user_id))
+			.map(|user| {
+				// A bridge matched this person by its own network's rules, which may know something
+				// we cannot see - a handle, a phone number - so one that does not match ours is
+				// ranked last rather than thrown away.
+				let score = [user.display_name.as_deref(), Some(user.user_id.localpart())]
+					.into_iter()
+					.flatten()
+					.filter_map(|text| matcher.score(text))
+					.max()
+					.unwrap_or(0);
+
+				(score, true, user)
+			}),
+	);
+
+	limited |= scored.len() > limit;
+
+	// Best first; then what this server already knows, which is someone with a history worth
+	// putting above a stranger of equal standing; then a stable tie-break so the same search
+	// twice gives the same answer.
+	scored.sort_by(|(left, left_bridged, left_user), (right, right_bridged, right_user)| {
 		right
 			.cmp(left)
+			.then_with(|| left_bridged.cmp(right_bridged))
 			.then_with(|| left_user.user_id.cmp(&right_user.user_id))
 	});
 
-	let mut results: Vec<User> = scored
+	let results: Vec<User> = scored
 		.into_iter()
 		.take(limit)
-		.map(|(_, user)| user)
+		.map(|(_, _, user)| user)
 		.collect();
-
-	/*
-	 * What is already here first, then what the networks say.
-	 *
-	 * Someone this server knows about is someone with a history worth putting at the top, and the
-	 * bridges are asked for the rest. A person who is both - already bridged - comes back from both
-	 * and is kept once.
-	 *
-	 * The networks are asked whichever way the local search went. Asking only when the local
-	 * results came up short, as this did at first, means the person you are looking for is missing
-	 * precisely when the server happens to know a handful of others whose names also match - and
-	 * the searcher has no way to tell that happened.
-	 */
-	let known: HashSet<OwnedUserId> = results
-		.iter()
-		.map(|user| user.user_id.clone())
-		.collect();
-
-	let bridged = services
-		.appservice
-		.search_users(sender_user, &search_term, limit)
-		.await;
-
-	for user in bridged {
-		if results.len() >= limit {
-			limited = true;
-			break;
-		}
-		if !known.contains(&user.user_id) {
-			results.push(user);
-		}
-	}
 
 	Ok(Response { results, limited })
 }
