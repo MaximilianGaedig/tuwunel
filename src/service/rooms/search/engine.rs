@@ -57,6 +57,9 @@ const WRITER_HEAP: usize = 50 * 1024 * 1024;
 /// One writer thread: indexing is a trickle of messages, not a bulk load.
 const WRITER_THREADS: usize = 1;
 
+/// Shortest word that can afford to have a character forgiven; the name matcher uses the same.
+const MIN_LEN_FOR_TYPO: usize = 3;
+
 /// The columns of one indexed message.
 #[derive(Clone, Copy)]
 struct Fields {
@@ -214,13 +217,33 @@ impl Engine {
 		want: usize,
 	) -> Result<Found> {
 		let searcher = self.reader.searcher();
-		let Some(query) = self.query(room, term) else {
+		let Some(query) = self.query(room, term, false) else {
 			return Ok(Found { count: 0, pdus: Vec::new() });
 		};
 
-		let count = searcher
+		let mut count = searcher
 			.search(&query, &Count)
 			.map_err(|e| err!(Database("Could not count what a search matched: {e}")))?;
+
+		/*
+		 * Nothing matched as typed, so ask again forgiving a typo.
+		 *
+		 * Second rather than always, because these results are ordered by recency and not by how
+		 * well they match, so a forgiving search has no way to put its worse answers last. Asking
+		 * exactly first means a search that was spelled right is never diluted, and one that was
+		 * not still finds something rather than nothing.
+		 */
+		let query = if count > 0 {
+			query
+		} else {
+			let Some(forgiving) = self.query(room, term, true) else {
+				return Ok(Found { count: 0, pdus: Vec::new() });
+			};
+			count = searcher
+				.search(&forgiving, &Count)
+				.map_err(|e| err!(Database("Could not count what a search matched: {e}")))?;
+			forgiving
+		};
 
 		let top = TopDocs::with_limit(want)
 			.and_offset(skip)
@@ -246,13 +269,20 @@ impl Engine {
 		Ok(Found { count, pdus })
 	}
 
-	/// The query for one search term: every word must match, each of them forgivingly.
+	/// The query for one search term: every word must match, as a prefix, optionally forgiving one
+	/// typo.
 	///
-	/// A word matches as a prefix so that searching as the user types works ("phot" finding
-	/// "photos"), and within an edit or two of what was typed so that a typo still finds it. How
-	/// many edits depends on how long the word is, the way Lucene's own `AUTO` fuzziness does:
-	/// forgiving a character of a three-letter word matches half the dictionary.
-	fn query(&self, room: ShortRoomId, term: &str) -> Option<Box<dyn Query>> {
+	/// A word always matches as a prefix, so searching as the user types works ("phot" finding
+	/// "photos"). Tolerance is the caller's choice, and being conservative about it matters here:
+	/// results inside a room come back newest first, because that is how you move around a
+	/// conversation, which means a query cannot lean on ranking to push a poor match down - a recent
+	/// noisy match lands at the top. Precision has to come from the query.
+	///
+	/// Measured on real history before this was fixed: allowing two edits made `thnaks` match
+	/// `thats`, `things` and even `the`, and `thanks` claim 16594 hits. One edit, and that noise is
+	/// gone. Telegram draws the same line - its in-chat search is exact and chronological, and the
+	/// forgiving search is the global one.
+	fn query(&self, room: ShortRoomId, term: &str, forgiving: bool) -> Option<Box<dyn Query>> {
 		let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(
 			Occur::Must,
 			Box::new(TermQuery::new(
@@ -264,20 +294,11 @@ impl Engine {
 		let mut words: usize = 0;
 		for word in tokenize(term) {
 			let term = Term::from_field_text(self.fields.body, &word);
-			let distance = match word.chars().count() {
-				| 0..=2 => 0,
-				| 3..=5 => 1,
-				| _ => 2,
-			};
-			clauses.push((
-				Occur::Must,
-				Box::new(BooleanQuery::new(vec![
-					// The word as typed, which scores higher than a near miss of it.
-					(Occur::Should, Box::new(TermQuery::new(term.clone(), IndexRecordOption::WithFreqs))),
-					// ...and anything starting with a word within `distance` edits of it.
-					(Occur::Should, Box::new(FuzzyTermQuery::new_prefix(term, distance, true))),
-				])),
-			));
+			// One edit at most, and none for a word too short to spare one: forgiving a character
+			// of `an` matches most of a conversation. Transpositions count as one edit, because
+			// that is what people actually type.
+			let distance = u8::from(forgiving && word.chars().count() >= MIN_LEN_FOR_TYPO);
+			clauses.push((Occur::Must, Box::new(FuzzyTermQuery::new_prefix(term, distance, true))));
 			words = words.saturating_add(1);
 		}
 
