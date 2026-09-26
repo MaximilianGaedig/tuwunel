@@ -1,32 +1,31 @@
-use std::{collections::BTreeMap, pin::pin, sync::Arc};
+mod engine;
+pub mod matcher;
+
+use std::{pin::pin, sync::Arc};
 
 use futures::{Stream, StreamExt};
 use ruma::{RoomId, UserId, api::client::search::search_events::v3::Criteria};
+use tokio::time::{Duration, sleep};
+use async_trait::async_trait;
 use tuwunel_core::{
-	Result,
-	arrayvec::ArrayVec,
-	implement,
-	matrix::event::{Event, Matches},
-	trace,
+	Result, Server, error, implement,
+	matrix::{
+		event::{Event, Matches},
+		pdu::PduId,
+	},
 	utils::{
-		ArrayVecExt, IterStream, ReadyExt, set,
+		IterStream, ReadyExt,
 		stream::{TryIgnore, WidebandExt},
 	},
 };
-use tuwunel_database::{Map, Txn, keyval::Val};
 
+use self::engine::Engine;
 use crate::rooms::{short::ShortRoomId, timeline::RawPduId};
 
 pub struct Service {
-	db: Data,
+	engine: Engine,
+	server: Arc<Server>,
 	services: Arc<crate::services::OnceServices>,
-}
-
-struct Data {
-	tokenids: Arc<Map>,
-	/// `shortroomid | trigram | SEP | word`: the words a room has used, by their three-letter
-	/// pieces, so a misspelt search term can be matched against them.
-	wordgrams: Arc<Map>,
 }
 
 #[derive(Clone, Debug)]
@@ -38,28 +37,44 @@ pub struct RoomQuery<'a> {
 	pub skip: usize,
 }
 
-type TokenId = ArrayVec<u8, TOKEN_ID_MAX_LEN>;
+/// How long a message may wait before it is searchable.
+///
+/// An index becomes readable when it is committed, and committing per message would cost a file
+/// write per message. So the worker commits on a timer, which is what Elasticsearch calls a refresh
+/// interval and for the same reason. Half a second is below what anyone notices between sending a
+/// message and finding it.
+const COMMIT_EVERY: Duration = Duration::from_millis(500);
 
-const TOKEN_ID_MAX_LEN: usize =
-	size_of::<ShortRoomId>() + WORD_MAX_LEN + 1 + size_of::<RawPduId>();
-const WORD_MAX_LEN: usize = 50;
+/// Messages beyond the page asked for, fetched so that the ones the reader may not see can be
+/// dropped without leaving the page short.
+const OVERFETCH: usize = 16;
 
-/// Fuzzy matching (see {@link Service::fuzzy_candidates}).
-const GRAM_LEN: usize = 3;
-const MIN_FUZZY_LEN: usize = GRAM_LEN;
-const SHORT_WORD_LEN: usize = 5;
-const MIN_SHARED_GRAMS: usize = 2;
-const MAX_FUZZY_CANDIDATES: usize = 8;
-
+#[async_trait]
 impl crate::Service for Service {
 	fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
+		let path = args.server.config.database_path.join("search");
+
 		Ok(Arc::new(Self {
-			db: Data {
-				tokenids: args.db["tokenids"].clone(),
-				wordgrams: args.db["roomwordgrams"].clone(),
-			},
+			engine: Engine::open(&path)?,
+			server: args.server.clone(),
 			services: args.services.clone(),
 		}))
+	}
+
+	async fn worker(self: Arc<Self>) -> Result {
+		while self.server.is_running() {
+			tokio::select! {
+				() = self.server.until_shutdown() => break,
+				() = sleep(COMMIT_EVERY) => {},
+			}
+
+			if let Err(e) = self.engine.commit() {
+				error!("Could not commit the search index: {e}");
+			}
+		}
+
+		// Whatever arrived since the last tick, so a restart does not lose it.
+		self.engine.commit()
 	}
 
 	fn name(&self) -> &str { crate::service::make_name(std::module_path!()) }
@@ -67,60 +82,33 @@ impl crate::Service for Service {
 
 #[implement(Service)]
 pub fn index_pdu(&self, shortroomid: ShortRoomId, pdu_id: &RawPduId, message_body: &str) {
-	self.index_words(shortroomid, message_body);
-
-	let items = tokenize(message_body).map(|word| {
-		let mut key = shortroomid.to_be_bytes().to_vec();
-		key.extend_from_slice(word.as_bytes());
-		key.push(0xFF);
-		key.extend_from_slice(pdu_id.as_ref()); // TODO: currently we save the room id a second time here
-
-		(key, [])
-	});
-
-	Txn::insert(&self.db.tokenids, items).execute();
-}
-
-#[implement(Service)]
-pub fn deindex_pdu(&self, shortroomid: ShortRoomId, pdu_id: &RawPduId, message_body: &str) {
-	let batch = tokenize(message_body).map(|word| {
-		let mut key = shortroomid.to_be_bytes().to_vec();
-		key.extend_from_slice(word.as_bytes());
-		key.push(0xFF);
-		key.extend_from_slice(pdu_id.as_ref()); // TODO: currently we save the room id a second time here
-		key
-	});
-
-	for token in batch {
-		self.db.tokenids.remove(&token);
+	let order = pdu_id.pdu_count().into_signed();
+	if let Err(e) = self
+		.engine
+		.add(shortroomid, pdu_id.as_ref(), order, message_body)
+	{
+		error!("Could not index a message for search: {e}");
 	}
 }
 
-/// Records a message's words by their three-letter pieces, so that a search term with a typo in it
-/// can still find them (see {@link fuzzy_candidates}). Words shorter than a trigram are skipped:
-/// those are already reachable by prefix.
 #[implement(Service)]
-fn index_words(&self, shortroomid: ShortRoomId, message_body: &str) {
-	let items = tokenize(message_body)
-		.filter(|word| word.len() >= MIN_FUZZY_LEN)
-		.flat_map(move |word| {
-			trigrams(&word)
-				.map(|gram| (make_gram_key(shortroomid, &gram, &word), []))
-				.collect::<Vec<_>>()
-		});
-
-	Txn::insert(&self.db.wordgrams, items).execute();
+pub fn deindex_pdu(&self, _shortroomid: ShortRoomId, pdu_id: &RawPduId, _message_body: &str) {
+	// The key identifies the message on its own, so what it used to say does not matter. The
+	// argument stays because the callers have it and the old index needed it.
+	if let Err(e) = self.engine.remove(pdu_id.as_ref()) {
+		error!("Could not remove a message from the search index: {e}");
+	}
 }
 
-/// Records the words of every room's existing messages for typo-tolerant search:
-/// for history that predates it. The exact-word index already covers old
-/// messages, so only the three-letter pieces are written.
+/// Indexes every message of every room, for history that predates this index.
 #[implement(Service)]
 pub async fn rebuild_words(&self) -> Result<usize> {
 	#[derive(serde::Deserialize)]
 	struct Body {
 		body: Option<String>,
 	}
+
+	self.engine.clear()?;
 
 	let rooms: Vec<_> = self
 		.services
@@ -142,80 +130,56 @@ pub async fn rebuild_words(&self) -> Result<usize> {
 				.pdus(None, &room_id, None)
 				.ignore_err()
 		);
-		while let Some((_, pdu)) = pdus.next().await {
+		while let Some((count, pdu)) = pdus.next().await {
 			if *pdu.event_type() != ruma::events::TimelineEventType::RoomMessage {
 				continue;
 			}
 			if let Ok(Body { body: Some(body) }) = pdu.get_content() {
-				self.index_words(shortroomid, &body);
+				// The timeline hands back the count; the index is keyed by the packed id.
+				let pdu_id: RawPduId = PduId { shortroomid, count }.into();
+				self.index_pdu(shortroomid, &pdu_id, &body);
 				indexed = indexed.saturating_add(1);
 			}
 		}
 	}
 
+	self.engine.commit()?;
+
 	Ok(indexed)
 }
 
-/// Words of this room close enough to `word` to be what the user meant: they share at least two
-/// three-letter pieces with it and are within an edit or two. Used only when nothing matched the
-/// term as typed, so an ordinary search never pays for it.
-#[implement(Service)]
-async fn fuzzy_candidates(&self, shortroomid: ShortRoomId, word: &str) -> Vec<String> {
-	if word.len() < MIN_FUZZY_LEN {
-		return Vec::new();
-	}
-
-	let mut shared: BTreeMap<String, usize> = BTreeMap::new();
-	for gram in trigrams(word) {
-		let prefix = make_gram_prefix(shortroomid, &gram);
-		let prefix_len = prefix.len();
-		let matches = prefix.clone();
-		let mut keys = pin!(
-			self.db
-				.wordgrams
-				.raw_keys_from(&prefix)
-				.ignore_err()
-				.ready_take_while(move |key| key.starts_with(&matches))
-		);
-
-		while let Some(key) = keys.next().await {
-			let Some(candidate) = key
-				.get(prefix_len..)
-				.and_then(|bytes| std::str::from_utf8(bytes).ok())
-			else {
-				continue;
-			};
-
-			*shared.entry(candidate.to_owned()).or_default() += 1;
-		}
-	}
-
-	let max_distance = if word.len() <= SHORT_WORD_LEN { 1 } else { 2 };
-	let mut candidates: Vec<_> = shared
-		.into_iter()
-		.filter(|(candidate, grams)| *grams >= MIN_SHARED_GRAMS && candidate.as_str() != word)
-		.filter(|(candidate, _)| within_distance(word, candidate, max_distance))
-		.collect();
-
-	// Closest first, and only a few: each one costs an index scan below.
-	candidates.sort_by_key(|(candidate, grams)| (usize::MAX - grams, candidate.len()));
-	candidates
-		.into_iter()
-		.take(MAX_FUZZY_CANDIDATES)
-		.map(|(candidate, _)| candidate)
-		.collect()
-}
-
+/// The page of a room's messages matching the query, and how many matched in total.
+///
+/// The count is every match, not the size of the page, so a client can say which of how many it is
+/// showing and step through them. It counts what the index matched rather than what survives the
+/// checks below - a message the reader cannot see is rare inside a room they are searching, and
+/// counting them exactly would mean fetching every match to find out.
 #[implement(Service)]
 pub async fn search_pdus<'a>(
 	&'a self,
 	query: &'a RoomQuery<'a>,
 ) -> Result<(usize, impl Stream<Item = impl Event + use<>> + Send + '_)> {
-	let pdu_ids: Vec<_> = self.search_pdu_ids(query).await?.collect().await;
+	let shortroomid = self
+		.services
+		.short
+		.get_shortroomid(query.room_id)
+		.await?;
+
+	let want = query
+		.skip
+		.saturating_add(query.limit)
+		.saturating_add(OVERFETCH);
+
+	let found = self
+		.engine
+		.search(shortroomid, &query.criteria.search_term, 0, want)?;
 
 	let filter = &query.criteria.filter;
-	let count = pdu_ids.len();
-	let pdus = pdu_ids
+	let pdus = found
+		.pdus
+		.into_iter()
+		.map(|pdu| RawPduId::from(pdu.as_slice()))
+		.collect::<Vec<_>>()
 		.into_iter()
 		.stream()
 		.wide_filter_map(async |result_pdu_id: RawPduId| {
@@ -237,210 +201,16 @@ pub async fn search_pdus<'a>(
 		.skip(query.skip)
 		.take(query.limit);
 
-	Ok((count, pdus))
+	Ok((found.count, pdus))
 }
 
-// result is modeled as a stream such that callers don't have to be refactored
-// though an additional async/wrap still exists for now
-#[implement(Service)]
-pub async fn search_pdu_ids(
-	&self,
-	query: &RoomQuery<'_>,
-) -> Result<impl Stream<Item = RawPduId> + Send + '_ + use<'_>> {
-	let shortroomid = self
-		.services
-		.short
-		.get_shortroomid(query.room_id)
-		.await?;
-
-	let pdu_ids = self
-		.search_pdu_ids_query_room(query, shortroomid)
-		.await;
-
-	let iters = pdu_ids.into_iter().map(IntoIterator::into_iter);
-
-	Ok(set::intersection(iters).stream())
-}
-
-#[implement(Service)]
-async fn search_pdu_ids_query_room(
-	&self,
-	query: &RoomQuery<'_>,
-	shortroomid: ShortRoomId,
-) -> Vec<Vec<RawPduId>> {
-	tokenize(&query.criteria.search_term)
-		.stream()
-		.wide_then(async |word| {
-			let mut ids: Vec<_> = self
-				.search_pdu_ids_query_words(shortroomid, &word)
-				.collect()
-				.await;
-
-			// Nothing matched what was typed: try the room's words that are a typo away.
-			if ids.is_empty() {
-				for candidate in self.fuzzy_candidates(shortroomid, &word).await {
-					ids.extend(
-						self.search_pdu_ids_query_words(shortroomid, &candidate)
-							.collect::<Vec<_>>()
-							.await,
-					);
-				}
-			}
-
-			// Prefix and fuzzy matches arrive grouped by the word that matched; the terms are
-			// intersected below, which needs one order: newest first.
-			ids.sort_unstable_by(|a: &RawPduId, b: &RawPduId| b.as_ref().cmp(a.as_ref()));
-			ids.dedup();
-			ids
-		})
-		.collect::<Vec<_>>()
-		.await
-}
-
-/// Iterate over PduId's whose message has a word starting with `word`.
-///
-/// Matching a prefix rather than the whole word is what lets a client search as
-/// the user types ("phot" finding "photos"), the way other chat apps do. The
-/// index key is `shortroomid | word | SEP | pduid`, so every word starting with
-/// the term shares the prefix `shortroomid | word` and the id is the key's last
-/// bytes, whichever word matched.
-#[implement(Service)]
-fn search_pdu_ids_query_words<'a>(
-	&'a self,
-	shortroomid: ShortRoomId,
-	word: &'a str,
-) -> impl Stream<Item = RawPduId> + Send + '_ {
-	self.search_pdu_ids_query_word(shortroomid, word)
-		.ready_filter_map(|key| {
-			// The id is whatever follows the word's separator; ids come in two lengths, so it
-			// cannot be taken as a fixed number of trailing bytes.
-			let room_len = size_of::<ShortRoomId>();
-			let sep = key
-				.get(room_len..)?
-				.iter()
-				.position(|byte| *byte == tuwunel_database::SEP)?;
-
-			Some(RawPduId::from(key.get(room_len.saturating_add(sep).saturating_add(1)..)?))
-		})
-}
-
-/// Iterate over raw database results for words starting with `word`
-#[implement(Service)]
-fn search_pdu_ids_query_word(
-	&self,
-	shortroomid: ShortRoomId,
-	word: &str,
-) -> impl Stream<Item = Val<'_>> + Send + '_ + use<'_> {
-	// The prefix without the separator, so longer words starting with it match too.
-	let prefix = make_word_prefix(shortroomid, word);
-
-	// Newest pdus first, so the scan starts just past this prefix's last possible key: the
-	// separator and id that follow the word are all below 0xFF repeated. Seeking to the bare
-	// prefix instead would start *before* every key that has it and find nothing.
-	let mut end = prefix.clone();
-	end.extend_from_slice(&[u8::MAX; size_of::<RawPduId>() + 2]);
-
-	self.db
-		.tokenids
-		.rev_raw_keys_from(&end)
-		.ignore_err()
-		.ready_take_while(move |key| key.starts_with(&prefix))
-}
-
+/// Forgets a whole room, when the room itself is being deleted.
 #[implement(Service)]
 pub async fn delete_all_search_tokenids_for_room(&self, room_id: &RoomId) -> Result {
 	let Ok(shortroomid) = self.services.short.get_shortroomid(room_id).await else {
 		return Ok(());
 	};
 
-	let txn = self
-		.db
-		.tokenids
-		.keys_prefix_raw(&shortroomid)
-		.ignore_err()
-		.ready_fold(self.services.db.txn(), |mut txn, key| {
-			trace!("Removing key: {key:?}");
-			txn.del_raw(&self.db.tokenids, key);
-			txn
-		})
-		.await;
-
-	txn.execute();
-
-	Ok(())
+	self.engine.remove_room(shortroomid)?;
+	self.engine.commit()
 }
-
-/// Splits a string into tokens used as keys in the search inverted index
-///
-/// This may be used to tokenize both message bodies (for indexing) or search
-/// queries (for querying).
-fn tokenize(body: &str) -> impl Iterator<Item = String> + Send + '_ {
-	body.split_terminator(|c: char| !c.is_alphanumeric())
-		.filter(|s| !s.is_empty())
-		.filter(|word| word.len() <= WORD_MAX_LEN)
-		.map(str::to_lowercase)
-}
-
-
-fn make_prefix(shortroomid: ShortRoomId, word: &str) -> TokenId {
-	let mut key = make_word_prefix(shortroomid, word);
-	key.push(tuwunel_database::SEP);
-	key
-}
-
-fn make_gram_key(shortroomid: ShortRoomId, gram: &str, word: &str) -> Vec<u8> {
-	let mut key = make_gram_prefix(shortroomid, gram);
-	key.extend_from_slice(word.as_bytes());
-	key
-}
-
-fn make_gram_prefix(shortroomid: ShortRoomId, gram: &str) -> Vec<u8> {
-	let mut key = Vec::with_capacity(size_of::<ShortRoomId>() + GRAM_LEN + 1);
-	key.extend_from_slice(&shortroomid.to_be_bytes());
-	key.extend_from_slice(gram.as_bytes());
-	key.push(tuwunel_database::SEP);
-	key
-}
-
-/// A word's overlapping three-letter pieces ("photo" -> pho, hot, oto).
-fn trigrams(word: &str) -> impl Iterator<Item = String> + '_ {
-	let chars: Vec<char> = word.chars().collect();
-	(0..chars.len().saturating_sub(GRAM_LEN.saturating_sub(1)))
-		.map(move |i| chars[i..i.saturating_add(GRAM_LEN)].iter().collect())
-}
-
-/// Whether two words are within `max` edits of each other (insert, delete or replace).
-fn within_distance(a: &str, b: &str, max: usize) -> bool {
-	let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
-	if a.len().abs_diff(b.len()) > max {
-		return false;
-	}
-
-	let mut previous: Vec<usize> = (0..=b.len()).collect();
-	let mut current = vec![0_usize; b.len().saturating_add(1)];
-	for (i, ca) in a.iter().enumerate() {
-		current[0] = i.saturating_add(1);
-		for (j, cb) in b.iter().enumerate() {
-			let cost = usize::from(ca != cb);
-			current[j.saturating_add(1)] = previous[j]
-				.saturating_add(cost)
-				.min(previous[j.saturating_add(1)].saturating_add(1))
-				.min(current[j].saturating_add(1));
-		}
-		if current.iter().min().is_some_and(|best| *best > max) {
-			return false; // every way through this row is already too far
-		}
-		std::mem::swap(&mut previous, &mut current);
-	}
-
-	previous[b.len()] <= max
-}
-
-/// The key prefix every word starting with `word` shares.
-fn make_word_prefix(shortroomid: ShortRoomId, word: &str) -> TokenId {
-	let mut key = TokenId::new();
-	key.extend_from_slice(&shortroomid.to_be_bytes());
-	key.extend_from_slice(word.as_bytes());
-	key
-}
-

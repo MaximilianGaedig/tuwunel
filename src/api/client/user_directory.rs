@@ -15,13 +15,16 @@ use tuwunel_core::{
 		stream::{BroadbandExt, ReadyExt, WidebandExt},
 	},
 };
-use tuwunel_service::Services;
+use tuwunel_service::{Services, rooms::search::matcher::Matcher};
 
 use crate::Ruma;
 
 // Tuwunel can handle a lot more results than synapse
 const LIMIT_MAX: usize = 500;
 const LIMIT_DEFAULT: usize = 10;
+
+/// How many candidates to consider per result asked for, so that ranking has something to rank.
+const RANK_WINDOW: usize = 20;
 
 /// # `POST /_matrix/client/r0/user_directory/search`
 ///
@@ -43,7 +46,20 @@ pub(crate) async fn search_users_route(
 	let sender_user = body.sender_user();
 	let limit = usize_from_ruma_bounded(body.limit, LIMIT_DEFAULT, LIMIT_MAX);
 
-	let search_term = body.search_term.to_lowercase();
+	let search_term = body.search_term.as_str();
+	/*
+	 * One compiled matcher, then every candidate scored against it.
+	 *
+	 * Matching used to be `contains` on the lowercased ID and display name, which meant `krzys`
+	 * could not find `Krzyś`, `carter bob` could not find `Bob Carter`, and nothing was ranked - so
+	 * with more matches than fit in the page, which ones came back was decided by the order the
+	 * user table happened to be in. The rule now is the one in rooms::search::matcher, which is the
+	 * rule the client and the message index also use.
+	 */
+	let Some(matcher) = Matcher::new(search_term) else {
+		return Ok(Response { results: Vec::new(), limited: false });
+	};
+
 	let users = services
 		.users
 		.stream()
@@ -52,23 +68,50 @@ pub(crate) async fn search_users_route(
 		.wide_filter_map(async |user_id| {
 			let display_name = services.profile.displayname(&user_id).await.ok();
 
-			matches_term(&user_id, display_name.as_deref(), &search_term)
-				.then_some((user_id, display_name))
+			// A Matrix ID is worth matching on as well as the name: it is what somebody types when
+			// they know the handle rather than the person.
+			let score = [display_name.as_deref(), Some(user_id.localpart())]
+				.into_iter()
+				.flatten()
+				.filter_map(|text| matcher.score(text))
+				.max()?;
+
+			Some((score, user_id, display_name))
 		})
-		.wide_filter_map(async |(user_id, display_name)| {
+		.wide_filter_map(async |(score, user_id, display_name)| {
 			should_show_user(&services, sender_user, &user_id)
 				.await
 				.then_async(async move || {
 					let avatar_url = services.profile.avatar_url(&user_id).await.ok();
 
-					User { user_id, display_name, avatar_url }
+					(score, User { user_id, display_name, avatar_url })
 				})
 				.await
 		});
 
+	/*
+	 * Ranking needs more than a page of candidates to rank, so this takes a bounded multiple of
+	 * what was asked for and sorts that. Unbounded would mean a one-letter search reading every
+	 * profile on the server; a single page would mean the best match is missing whenever it happens
+	 * to sit late in the user table, which is the bug being fixed.
+	 */
+	let ceiling = limit.saturating_mul(RANK_WINDOW).min(LIMIT_MAX);
 	pin_mut!(users);
-	let mut results: Vec<User> = users.by_ref().take(limit).collect().await;
-	let mut limited = users.next().await.is_some();
+	let mut scored: Vec<(u32, User)> = users.by_ref().take(ceiling).collect().await;
+	let mut limited = users.next().await.is_some() || scored.len() > limit;
+
+	// Best first, and a stable tie-break so the same search twice gives the same answer.
+	scored.sort_by(|(left, left_user), (right, right_user)| {
+		right
+			.cmp(left)
+			.then_with(|| left_user.user_id.cmp(&right_user.user_id))
+	});
+
+	let mut results: Vec<User> = scored
+		.into_iter()
+		.take(limit)
+		.map(|(_, user)| user)
+		.collect();
 
 	/*
 	 * What is already here first, then what the networks say.
@@ -76,38 +119,33 @@ pub(crate) async fn search_users_route(
 	 * Someone this server knows about is someone with a history worth putting at the top, and the
 	 * bridges are asked for the rest. A person who is both - already bridged - comes back from both
 	 * and is kept once.
+	 *
+	 * The networks are asked whichever way the local search went. Asking only when the local
+	 * results came up short, as this did at first, means the person you are looking for is missing
+	 * precisely when the server happens to know a handful of others whose names also match - and
+	 * the searcher has no way to tell that happened.
 	 */
-	if results.len() < limit {
-		let known: HashSet<OwnedUserId> = results
-			.iter()
-			.map(|user| user.user_id.clone())
-			.collect();
+	let known: HashSet<OwnedUserId> = results
+		.iter()
+		.map(|user| user.user_id.clone())
+		.collect();
 
-		let bridged = services
-			.appservice
-			.search_users(sender_user, &search_term, limit)
-			.await;
+	let bridged = services
+		.appservice
+		.search_users(sender_user, &search_term, limit)
+		.await;
 
-		for user in bridged {
-			if results.len() >= limit {
-				limited = true;
-				break;
-			}
-			if !known.contains(&user.user_id) {
-				results.push(user);
-			}
+	for user in bridged {
+		if results.len() >= limit {
+			limited = true;
+			break;
+		}
+		if !known.contains(&user.user_id) {
+			results.push(user);
 		}
 	}
 
 	Ok(Response { results, limited })
-}
-
-fn matches_term(user_id: &UserId, display_name: Option<&str>, search_term: &str) -> bool {
-	user_id
-		.as_str()
-		.to_lowercase()
-		.contains(search_term)
-		|| display_name.is_some_and(|name| name.to_lowercase().contains(search_term))
 }
 
 async fn should_show_user(

@@ -131,6 +131,9 @@ webpage.workspace = true
 webpage.optional = true
 tuwunel-core.workspace = true
 tuwunel-database.workspace = true
+tantivy = "0.26.2"
+# The same automaton crate tantivy's own fuzzy queries use; see rooms/search/matcher.rs.
+levenshtein_automata = "0.2.1"
 
 # killpg, for reaping a video thumbnail program's process group
 [target.'cfg(unix)'.dependencies]
