@@ -76,6 +76,10 @@ pub enum Class {
 	File = 6,
 	Sticker = 7,
 	Encrypted = 8,
+	/// Text with a link in it. Counted apart from plain text because the Links tab of a client's
+	/// shared media is a list of these, and without a count of its own it is the one tab that
+	/// cannot say how many there are - the server sees them as text like any other.
+	Link = 9,
 }
 
 impl Class {
@@ -90,6 +94,7 @@ impl Class {
 			| Self::File => "file",
 			| Self::Sticker => "sticker",
 			| Self::Encrypted => "encrypted",
+			| Self::Link => "link",
 		}
 	}
 
@@ -103,6 +108,7 @@ impl Class {
 			| 6 => Self::File,
 			| 7 => Self::Sticker,
 			| 8 => Self::Encrypted,
+			| 9 => Self::Link,
 			| _ => return None,
 		})
 	}
@@ -602,11 +608,20 @@ fn class_of(kind: &TimelineEventType, content: Option<&MessageContent>) -> Optio
 				| Some("m.audio") if is_voice => Class::Voice,
 				| Some("m.audio") => Class::Audio,
 				| Some("m.file") => Class::File,
+				// A message whose text carries a link, matched the way the media index matches one
+				// (rooms::media_index::contains_link) so the tab and the count agree.
+				| _ if content.body.as_deref().is_some_and(has_link) => Class::Link,
 				| _ => Class::Text,
 			})
 		},
 		| _ => None,
 	}
+}
+
+/// Whether the text has a link in it, as a client's Links tab counts one.
+fn has_link(body: &str) -> bool {
+	body.split_whitespace()
+		.any(|word| word.starts_with("http://") || word.starts_with("https://"))
 }
 
 fn count_key(shortroomid: ShortRoomId, class: Class, sender: &str) -> Vec<u8> {
