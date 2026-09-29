@@ -137,6 +137,8 @@ pub struct Stats {
 
 #[derive(Deserialize)]
 struct MessageContent {
+	/// The message's text, which is what decides whether it counts as a link.
+	body: Option<String>,
 	url: Option<String>,
 	file: Option<FileContent>,
 	info: Option<MediaInfo>,
@@ -634,7 +636,61 @@ fn count_key(shortroomid: ShortRoomId, class: Class, sender: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-	use super::calendar;
+	use ruma::events::TimelineEventType;
+
+	use super::{Class, MessageContent, calendar, class_of, has_link};
+
+	fn message(msgtype: Option<&str>, body: Option<&str>) -> MessageContent {
+		MessageContent {
+			body: body.map(ToOwned::to_owned),
+			url: None,
+			file: None,
+			info: None,
+			msgtype: msgtype.map(ToOwned::to_owned),
+			msc3245_voice: None,
+			msc2516_voice: None,
+		}
+	}
+
+	fn class(msgtype: Option<&str>, body: Option<&str>) -> Option<Class> {
+		class_of(&TimelineEventType::RoomMessage, Some(&message(msgtype, body)))
+	}
+
+	#[test]
+	fn text_with_a_link_is_counted_apart_from_text() {
+		assert_eq!(class(Some("m.text"), Some("look at https://example.org")), Some(Class::Link));
+		assert_eq!(class(Some("m.text"), Some("no link here")), Some(Class::Text));
+		// A message with no body at all is text, not a link: nothing to find one in.
+		assert_eq!(class(Some("m.text"), None), Some(Class::Text));
+	}
+
+	#[test]
+	fn media_stays_media_whatever_its_caption_says() {
+		// The caption of a photo is not a link the Links tab should list; the photo is the message.
+		assert_eq!(class(Some("m.image"), Some("https://example.org")), Some(Class::Image));
+		assert_eq!(class(Some("m.video"), Some("https://example.org")), Some(Class::Video));
+		assert_eq!(class(Some("m.file"), Some("https://example.org")), Some(Class::File));
+	}
+
+	#[test]
+	fn a_link_is_a_whole_word_beginning_with_a_scheme() {
+		assert!(has_link("https://example.org"));
+		assert!(has_link("before http://example.org after"));
+		// Not a link: the scheme has to start the word, or a URL mentioned inside another word
+		// would count and the tab's number would stop matching what it lists.
+		assert!(!has_link("seehttps://example.org"));
+		assert!(!has_link("ftp://example.org"));
+		assert!(!has_link(""));
+	}
+
+	#[test]
+	fn the_kinds_that_are_not_messages_keep_their_own_class() {
+		assert_eq!(class_of(&TimelineEventType::Sticker, None), Some(Class::Sticker));
+		assert_eq!(class_of(&TimelineEventType::RoomEncrypted, None), Some(Class::Encrypted));
+		// A message with no content at all cannot be classified, so it is not counted.
+		assert_eq!(class_of(&TimelineEventType::RoomMessage, None), None);
+	}
+
 
 	#[test]
 	fn calendar_month_and_hour_of_week() {
