@@ -18,14 +18,14 @@ use futures::{Stream, StreamExt};
 use ruma::{RoomId, events::TimelineEventType};
 use serde::Deserialize;
 use tuwunel_core::{
-	Result, implement,
+	Result, error, implement, info,
 	matrix::{
 		Event,
 		pdu::{PduCount, PduId, RawPduId},
 	},
 	utils::{ReadyExt, stream::TryIgnore},
 };
-use tuwunel_database::{Map, Txn};
+use tuwunel_database::{Deserialized, Map, Txn};
 
 use crate::rooms::short::ShortRoomId;
 
@@ -36,6 +36,25 @@ pub struct Service {
 
 struct Data {
 	mediaids: Arc<Map>,
+	global: Arc<Map>,
+}
+
+/// Which rules the index was built by. Raise it whenever [`kinds_for`] sorts
+/// any event differently: history indexed by the old rules is then indexed
+/// again on the next start, without anyone having to ask.
+///
+/// 1. media, files, links, music, voice.
+/// 2. calls.
+const INDEX_VERSION: u64 = 2;
+const INDEX_VERSION_KEY: &[u8] = b"media_index_version";
+
+/// Whether history indexed by the rules `stored` names has to be indexed
+/// again. An index without a version predates versions, so it is redone too.
+const fn needs_rebuild(stored: Option<u64>) -> bool {
+	match stored {
+		| Some(version) => version < INDEX_VERSION,
+		| None => true,
+	}
 }
 
 /// The kinds a client lists separately. The byte is part of the key, so the
@@ -119,9 +138,41 @@ const KEY_LEN: usize = size_of::<ShortRoomId>() + 1 + size_of::<RawPduId>();
 impl crate::Service for Service {
 	fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
 		Ok(Arc::new(Self {
-			db: Data { mediaids: args.db["roommediaids"].clone() },
+			db: Data {
+				mediaids: args.db["roommediaids"].clone(),
+				global: args.db["global"].clone(),
+			},
 			services: args.services.clone(),
 		}))
+	}
+
+	/// Brings history up to the current rules, once, in the background: the
+	/// server serves meanwhile, and a stop part-way leaves the version
+	/// unrecorded so the next start does it again.
+	async fn worker(self: Arc<Self>) -> Result {
+		let stored = self
+			.db
+			.global
+			.get(INDEX_VERSION_KEY)
+			.await
+			.deserialized::<u64>()
+			.ok();
+		if !needs_rebuild(stored) {
+			return Ok(());
+		}
+
+		info!(?stored, current = INDEX_VERSION, "Indexing existing history for the media index");
+		// Added over what is there rather than cleared first: the rooms' tabs stay full while it runs.
+		match self.index_history().await {
+			| Ok(indexed) => {
+				self.db.global.raw_put(INDEX_VERSION_KEY, INDEX_VERSION);
+				info!("Indexed the media of {indexed} messages.");
+			},
+			| Err(e) if !self.services.server.is_running() => info!("Media indexing stopped: {e}"),
+			| Err(e) => error!("Rebuilding the media index failed: {e}"),
+		}
+
+		Ok(())
 	}
 
 	fn name(&self) -> &str { crate::service::make_name(std::module_path!()) }
@@ -246,7 +297,15 @@ fn read_ts(val: &[u8]) -> Option<u64> {
 #[implement(Service)]
 pub async fn rebuild(&self) -> Result<usize> {
 	self.db.mediaids.clear().await;
+	let indexed = self.index_history().await?;
+	self.db.global.raw_put(INDEX_VERSION_KEY, INDEX_VERSION);
 
+	Ok(indexed)
+}
+
+/// Indexes every room's existing messages over whatever the index holds.
+#[implement(Service)]
+async fn index_history(&self) -> Result<usize> {
 	let rooms: Vec<_> = self
 		.services
 		.metadata
@@ -257,6 +316,7 @@ pub async fn rebuild(&self) -> Result<usize> {
 
 	let mut indexed: usize = 0;
 	for room_id in rooms {
+		self.services.server.check_running()?;
 		indexed = indexed.saturating_add(self.rebuild_room(&room_id).await?);
 	}
 
@@ -387,7 +447,7 @@ const fn prefix_len() -> usize { size_of::<ShortRoomId>().saturating_add(1) }
 mod tests {
 	use ruma::events::TimelineEventType;
 
-	use super::{ActionMessage, MediaKind, MessageContent, kinds_for};
+	use super::{ActionMessage, INDEX_VERSION, MediaKind, MessageContent, kinds_for, needs_rebuild};
 
 	fn message(msgtype: Option<&str>, body: Option<&str>, action: Option<&str>) -> MessageContent {
 		MessageContent {
@@ -419,5 +479,27 @@ mod tests {
 		assert!(kinds_for(&TimelineEventType::CallHangup, None).is_empty());
 		let other_action = message(Some("m.notice"), Some("x"), Some("something_else"));
 		assert!(kinds_for(&TimelineEventType::RoomMessage, Some(&other_action)).is_empty());
+	}
+
+	// Calls were added to the rules after the live server had years of history indexed: that history
+	// had no calls in it until someone thought to type an admin command.
+	#[test]
+	fn history_indexed_by_older_rules_is_indexed_again() {
+		assert!(needs_rebuild(None), "an index from before versions were recorded");
+		assert!(needs_rebuild(Some(1)), "an index from before calls");
+		assert!(!needs_rebuild(Some(INDEX_VERSION)));
+	}
+
+	// The rules as INDEX_VERSION names them. If this fails, the rules changed: update the table and
+	// raise INDEX_VERSION, or existing history keeps being sorted by the old ones.
+	#[test]
+	fn the_rules_are_the_ones_the_version_names() {
+		assert_eq!(INDEX_VERSION, 2);
+		let link = message(Some("m.text"), Some("see https://example.org"), None);
+		let call = message(Some("m.notice"), Some("Voice call"), Some("call"));
+		assert_eq!(kinds_for(&TimelineEventType::Sticker, None), [MediaKind::Media]);
+		assert_eq!(kinds_for(&TimelineEventType::CallInvite, None), [MediaKind::Calls]);
+		assert_eq!(kinds_for(&TimelineEventType::RoomMessage, Some(&link)), [MediaKind::Links]);
+		assert_eq!(kinds_for(&TimelineEventType::RoomMessage, Some(&call)), [MediaKind::Calls]);
 	}
 }
