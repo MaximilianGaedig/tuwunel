@@ -133,12 +133,11 @@ pub(crate) async fn get_room_media_route(
 
 	let events: Vec<_> = services
 		.media_index
-		.media_entries(shortroomid, kind, from)
-		// Seeking by date reads the index alone: the rows carry their own time, so skipping to a month
-		// costs no event fetches at all. A row written before the index stored times has none, and is
-		// kept rather than skipped, so an unrebuilt index still lists everything.
+		.dated_entries(shortroomid, kind, from)
+		// Seeking by date reads the index: the rows carry their own time, so skipping to a month costs
+		// no event fetches, except once for a row written before times were stored.
 		.skip_while(move |(_, ts)| {
-			let skip = before_ts.is_some_and(|before| ts.is_some_and(|ts| ts > before));
+			let skip = before_ts.is_some_and(|before| *ts > before);
 			async move { skip }
 		})
 		.map(|(pdu_id, _)| pdu_id)
@@ -177,20 +176,17 @@ pub(crate) async fn get_room_media_route(
 
 /// How many items the room holds per calendar month, newest first.
 ///
-/// Read from the index alone - the rows carry their own time - so a scrubber can be sized and labelled
-/// without opening a single event. Rows from before the index stored times are left out of the counts
-/// rather than guessed at; `rebuild_room` fills them in.
+/// Read from the index - the rows carry their own time - so a scrubber can be sized and labelled
+/// without opening the events. A row from before the index stored times is dated from its event the
+/// first time it is counted, and keeps that date.
 async fn month_counts(
 	services: &crate::State,
 	shortroomid: tuwunel_service::rooms::short::ShortRoomId,
 	kind: MediaKind,
 ) -> Result<Response> {
 	let mut months: Vec<MonthCount> = Vec::new();
-	let mut entries = pin!(services.media_index.media_entries(shortroomid, kind, None));
+	let mut entries = pin!(services.media_index.dated_entries(shortroomid, kind, None));
 	while let Some((_, ts)) = entries.next().await {
-		let Some(ts) = ts else {
-			continue;
-		};
 		let month = month_of(ts);
 		match months.last_mut() {
 			| Some(last) if last.month == month => last.count = last.count.saturating_add(1),

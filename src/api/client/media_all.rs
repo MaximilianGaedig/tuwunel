@@ -155,13 +155,10 @@ pub(crate) async fn get_all_media_route(
 		};
 
 		let mut taken = 0_usize;
-		let mut entries = pin!(services.media_index.media_entries(shortroomid, kind, None));
+		// Dated as they are read: a row written before the index stored times is
+		// placed by its event's own time rather than left out of the list.
+		let mut entries = pin!(services.media_index.dated_entries(shortroomid, kind, None));
 		while let Some((pdu_id, ts)) = entries.next().await {
-			// A row written before the index stored times cannot be placed in a
-			// list that is ordered by time, so it is left to the per-room view.
-			let Some(ts) = ts else {
-				continue;
-			};
 			if from
 				.as_ref()
 				.is_some_and(|cursor| !cursor.precedes(ts, &pdu_id))

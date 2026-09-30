@@ -148,7 +148,8 @@ pub fn deindex_pdu(&self, shortroomid: ShortRoomId, pdu_id: &RawPduId) {
 
 /// A room's media of one kind, newest first, with each event's time where the index knows it.
 ///
-/// The time is missing only for rows written before it was stored; `rebuild_room` fills them in.
+/// The time is missing only for rows written before it was stored; [`dated_entries`](Self::dated_entries)
+/// fills them in as they are read, and `rebuild_room` all at once.
 #[implement(Service)]
 pub fn media_entries<'a>(
 	&'a self,
@@ -167,6 +168,39 @@ pub fn media_entries<'a>(
 		.ignore_err()
 		.ready_take_while(move |(key, _): &(&[u8], &[u8])| key.starts_with(&prefix))
 		.map(|(key, val)| (RawPduId::from(&key[prefix_len()..]), read_ts(val)))
+}
+
+/// [`media_entries`](Self::media_entries), with every row's time: one written before times were
+/// stored gets it from its event, and keeps it, so each such row is opened once and never again.
+///
+/// Without this a room indexed before the times existed counted only its newest media by month - a
+/// scrubber over years of history read "September 2026" from end to end - and a seek to a date
+/// stopped at the first undated row, whatever its date really was. Rows whose event can no longer
+/// be read are dropped from the stream: there is nothing to list for them either.
+#[implement(Service)]
+pub fn dated_entries<'a>(
+	&'a self,
+	shortroomid: ShortRoomId,
+	kind: MediaKind,
+	until: Option<PduCount>,
+) -> impl Stream<Item = (RawPduId, u64)> + Send + 'a {
+	self.media_entries(shortroomid, kind, until)
+		.filter_map(move |(pdu_id, ts)| async move {
+			if let Some(ts) = ts {
+				return Some((pdu_id, ts));
+			}
+			let pdu = self
+				.services
+				.timeline
+				.get_pdu_from_id(&pdu_id)
+				.await
+				.ok()?;
+			let ts = origin_ts(&pdu);
+			self.db
+				.mediaids
+				.insert(&make_key(shortroomid, kind, &pdu_id), ts);
+			Some((pdu_id, u64::from_be_bytes(ts)))
+		})
 }
 
 /// A room's media of one kind, newest first. `until` continues a previous page.
