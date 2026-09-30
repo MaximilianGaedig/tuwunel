@@ -208,6 +208,7 @@ pub(crate) fn services(&self) -> impl Iterator<Item = Arc<dyn Service>> + Send {
 		cast!(self.oauth),
 		cast!(self.retention),
 		cast!(self.room_stats),
+		cast!(self.media_index),
 		cast!(self.registration_tokens),
 		cast!(self.rendezvous),
 		cast!(self.profile),

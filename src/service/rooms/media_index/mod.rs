@@ -504,4 +504,12 @@ mod tests {
 		assert_eq!(kinds_for(&TimelineEventType::RoomMessage, Some(&link)), [MediaKind::Links]);
 		assert_eq!(kinds_for(&TimelineEventType::RoomMessage, Some(&call)), [MediaKind::Calls]);
 	}
+
+	// The manager runs only the workers of the services it lists: without the entry the reindex
+	// above never started, and old history still had no calls after a deploy.
+	#[test]
+	fn the_worker_is_started() {
+		let services = include_str!("../../services.rs");
+		assert!(services.contains("cast!(self.media_index)"));
+	}
 }
