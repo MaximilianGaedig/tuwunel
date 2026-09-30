@@ -14,6 +14,7 @@
 
 use std::{pin::pin, sync::Arc};
 
+use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use ruma::{RoomId, events::TimelineEventType};
 use serde::Deserialize;
@@ -135,6 +136,7 @@ const RTC_NOTIFICATIONS: [&str; 4] = [
 
 const KEY_LEN: usize = size_of::<ShortRoomId>() + 1 + size_of::<RawPduId>();
 
+#[async_trait]
 impl crate::Service for Service {
 	fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
 		Ok(Arc::new(Self {
