@@ -390,13 +390,17 @@ fn check_remote_addr(&self, response: &reqwest::Response) -> Result {
 #[implement(Service)]
 async fn oembed_recover(&self, url: &Url, data: UrlPreviewData) -> UrlPreviewData {
 	// an already-staged image would be orphaned by replacing the preview
-	if data.title.is_some() || data.image.is_some() {
+	if data.image.is_some() {
 		return data;
 	}
 
 	let Some(endpoint) = oembed_endpoint(url) else {
 		return data;
 	};
+
+	// Every video page has an image. Without one, the page is YouTube's bot wall
+	// ("sign in to confirm you're not a bot", titled "- YouTube") served to
+	// datacenter addresses, which oEmbed still answers properly.
 
 	self.oembed_preview(&endpoint, url)
 		.await
