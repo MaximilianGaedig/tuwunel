@@ -43,7 +43,7 @@ pub struct Request {
 	#[ruma_api(path)]
 	pub room_id: OwnedRoomId,
 
-	/// Which list: `media`, `files`, `links`, `music` or `voice`.
+	/// Which list: `media`, `files`, `links`, `music`, `voice` or `calls`.
 	#[ruma_api(query)]
 	pub kind: String,
 

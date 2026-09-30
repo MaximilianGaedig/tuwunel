@@ -22,9 +22,9 @@ jobs:
         with:
           extra_nix_config: |
             accept-flake-config = true
-      - name: Test account data forwarding
+      - name: Test account data forwarding and the media index
         # The dev shell links RocksDB (and so libstdc++) dynamically but doesn't put them on the loader path.
-        run: nix develop --impure .#dynamic --command bash -c 'LD_LIBRARY_PATH="$ROCKSDB_LIB_DIR:$(dirname "$(c++ -print-file-name=libstdc++.so.6)")" cargo test -p tuwunel_service --lib account_data'
+        run: nix develop --impure .#dynamic --command bash -c 'LD_LIBRARY_PATH="$ROCKSDB_LIB_DIR:$(dirname "$(c++ -print-file-name=libstdc++.so.6)")" cargo test -p tuwunel_service --lib -- account_data media_index'
       - name: Build static binary
         run: nix build --impure -L .#static-x86_64-linux-musl
       - name: Collect binary

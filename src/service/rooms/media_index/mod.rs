@@ -53,6 +53,9 @@ pub enum MediaKind {
 	Music = 4,
 	/// Voice messages.
 	Voice = 5,
+	/// Calls starting: a legacy call's invite, a MatrixRTC call's ring, or a bridge's line about a call
+	/// on its network - so a client's call history is one request instead of every room's timeline.
+	Calls = 6,
 }
 
 impl MediaKind {
@@ -64,6 +67,7 @@ impl MediaKind {
 			| "links" => Some(Self::Links),
 			| "music" => Some(Self::Music),
 			| "voice" => Some(Self::Voice),
+			| "calls" => Some(Self::Calls),
 			| _ => None,
 		}
 	}
@@ -76,8 +80,16 @@ impl MediaKind {
 			| Self::Links => "links",
 			| Self::Music => "music",
 			| Self::Voice => "voice",
+			| Self::Calls => "calls",
 		}
 	}
+}
+
+/// A bridge's line about a call on its network (`com.beeper.action_message` of type `call`).
+#[derive(Deserialize)]
+struct ActionMessage {
+	#[serde(rename = "type")]
+	kind: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -90,7 +102,17 @@ struct MessageContent {
 	msc3245_voice: Option<serde_json::Value>,
 	#[serde(rename = "org.matrix.msc2516.voice")]
 	msc2516_voice: Option<serde_json::Value>,
+	#[serde(rename = "com.beeper.action_message")]
+	action_message: Option<ActionMessage>,
 }
+
+/// The event types that start a MatrixRTC call's ringing, stable and unstable.
+const RTC_NOTIFICATIONS: [&str; 4] = [
+	"m.rtc.notification",
+	"org.matrix.msc4075.rtc.notification",
+	"m.call.notify",
+	"org.matrix.msc4075.call.notify",
+];
 
 const KEY_LEN: usize = size_of::<ShortRoomId>() + 1 + size_of::<RawPduId>();
 
@@ -139,6 +161,7 @@ pub fn deindex_pdu(&self, shortroomid: ShortRoomId, pdu_id: &RawPduId) {
 		MediaKind::Links,
 		MediaKind::Music,
 		MediaKind::Voice,
+		MediaKind::Calls,
 	] {
 		self.db
 			.mediaids
@@ -280,19 +303,44 @@ pub async fn rebuild_room(&self, room_id: &RoomId) -> Result<usize> {
 /// Which kinds an event belongs to: a message may be both (a link in a file's
 /// caption), and anything the server cannot read belongs to none.
 fn kinds_of<E: Event>(pdu: &E) -> Vec<MediaKind> {
+	let content = (*pdu.kind() == TimelineEventType::RoomMessage)
+		.then(|| pdu.get_content::<MessageContent>().ok())
+		.flatten();
+	kinds_for(pdu.kind(), content.as_ref())
+}
+
+/// [`kinds_of`] from the event's type and, for a message, its content.
+fn kinds_for(event_type: &TimelineEventType, content: Option<&MessageContent>) -> Vec<MediaKind> {
 	let mut kinds = Vec::new();
-	match pdu.kind() {
+	match event_type {
 		| TimelineEventType::Sticker => {
 			kinds.push(MediaKind::Media);
 			return kinds;
 		},
+		| TimelineEventType::CallInvite => {
+			kinds.push(MediaKind::Calls);
+			return kinds;
+		},
 		| TimelineEventType::RoomMessage => {},
-		| _ => return kinds,
+		| other => {
+			if RTC_NOTIFICATIONS.contains(&other.to_string().as_str()) {
+				kinds.push(MediaKind::Calls);
+			}
+			return kinds;
+		},
 	}
 
-	let Ok(content) = pdu.get_content::<MessageContent>() else {
+	let Some(content) = content else {
 		return kinds;
 	};
+	if content
+		.action_message
+		.as_ref()
+		.is_some_and(|action| action.kind.as_deref() == Some("call"))
+	{
+		kinds.push(MediaKind::Calls);
+		return kinds;
+	}
 	let has_file = content.url.is_some() || content.file.is_some();
 	let is_voice = content.msc3245_voice.is_some() || content.msc2516_voice.is_some();
 
@@ -334,3 +382,42 @@ fn make_prefix(shortroomid: ShortRoomId, kind: MediaKind) -> Vec<u8> {
 }
 
 const fn prefix_len() -> usize { size_of::<ShortRoomId>().saturating_add(1) }
+
+#[cfg(test)]
+mod tests {
+	use ruma::events::TimelineEventType;
+
+	use super::{ActionMessage, MediaKind, MessageContent, kinds_for};
+
+	fn message(msgtype: Option<&str>, body: Option<&str>, action: Option<&str>) -> MessageContent {
+		MessageContent {
+			msgtype: msgtype.map(ToOwned::to_owned),
+			body: body.map(ToOwned::to_owned),
+			url: None,
+			file: None,
+			msc3245_voice: None,
+			msc2516_voice: None,
+			action_message: action.map(|kind| ActionMessage { kind: Some(kind.to_owned()) }),
+		}
+	}
+
+	#[test]
+	fn calls_are_indexed_in_every_shape_they_take() {
+		// A legacy 1:1 call, a MatrixRTC call's ring (stable and unstable), and a bridge's line.
+		assert_eq!(kinds_for(&TimelineEventType::CallInvite, None), [MediaKind::Calls]);
+		for rtc in ["m.rtc.notification", "org.matrix.msc4075.rtc.notification"] {
+			assert_eq!(kinds_for(&TimelineEventType::from(rtc), None), [MediaKind::Calls], "{rtc}");
+		}
+		let line = message(Some("m.notice"), Some("Missed call"), Some("call"));
+		assert_eq!(kinds_for(&TimelineEventType::RoomMessage, Some(&line)), [MediaKind::Calls]);
+	}
+
+	#[test]
+	fn other_events_are_not_calls() {
+		let text = message(Some("m.text"), Some("call me at https://example.org"), None);
+		assert_eq!(kinds_for(&TimelineEventType::RoomMessage, Some(&text)), [MediaKind::Links]);
+		assert!(kinds_for(&TimelineEventType::CallHangup, None).is_empty());
+		let other_action = message(Some("m.notice"), Some("x"), Some("something_else"));
+		assert!(kinds_for(&TimelineEventType::RoomMessage, Some(&other_action)).is_empty());
+	}
+}
