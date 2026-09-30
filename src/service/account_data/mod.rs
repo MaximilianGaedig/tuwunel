@@ -3,6 +3,7 @@
 //! The service stores raw account data events behind monotonic update counters and maintains a
 //! secondary index by room, user, and event type. Its streams expose changes for incremental sync.
 
+mod appservice;
 mod direct;
 mod push_rules;
 mod room_tags;
@@ -116,6 +117,18 @@ pub async fn update(
 		.qry(&key)
 		.await;
 
+	let bridged = appservice::is_bridged(room_id, event_type.to_string().as_str());
+	let prev_data: Option<serde_json::Value> = match &prev {
+		| Ok(prev) if bridged => self
+			.db
+			.roomuserdataid_accountdata
+			.get(prev)
+			.await
+			.deserialized()
+			.ok(),
+		| _ => None,
+	};
+
 	let mut txn = self.services.db.txn();
 
 	txn.put(&self.db.roomuserdataid_accountdata, roomuserdataid, Json(data));
@@ -126,6 +139,11 @@ pub async fn update(
 	}
 
 	txn.execute();
+
+	if bridged {
+		self.notify_appservices(room_id, user_id, &event_type.to_string(), data, prev_data.as_ref())
+			.await;
+	}
 
 	Ok(())
 }
