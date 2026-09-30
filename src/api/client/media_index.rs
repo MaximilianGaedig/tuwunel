@@ -60,6 +60,11 @@ pub struct Request {
 	#[ruma_api(query)]
 	pub before_ts: Option<UInt>,
 
+	/// Skips this many rows of the index first (after `before_ts`, if given), so a client that knows
+	/// from the month counts where a stretch of the list sits can load exactly that stretch.
+	#[ruma_api(query)]
+	pub skip: Option<UInt>,
+
 	/// Returns how many items there are per calendar month instead of the items themselves, so a
 	/// scrubber can be drawn and labelled without loading anything.
 	#[ruma_api(query)]
@@ -73,6 +78,17 @@ pub struct Response {
 
 	/// Pass as `from` for the next page; absent once the list is exhausted.
 	pub end: Option<String>,
+
+	/// With `skip`: each item's place in the index, counted like the month counts are, from the
+	/// newest row (or the newest at `before_ts`). Places the list skipped hold nothing the user can
+	/// see - a redacted or hidden event - so a client can stop waiting for them.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub positions: Option<Vec<u64>>,
+
+	/// With `skip`: the first place after the rows this response looked at, so everything from
+	/// `skip` up to it has been answered, the empty places included.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub next_position: Option<u64>,
 
 	/// How many items each month holds, newest month first, when `months` was asked for.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -130,6 +146,10 @@ pub(crate) async fn get_room_media_route(
 	}
 
 	let before_ts: Option<u64> = body.before_ts.map(Into::into);
+	let skip: Option<u64> = body.skip.map(Into::into);
+	let first = skip.unwrap_or(0);
+	// The last place looked at, so a response can say how far it got even when its tail was hidden.
+	let looked = std::sync::atomic::AtomicU64::new(first);
 
 	let events: Vec<_> = services
 		.media_index
@@ -140,8 +160,11 @@ pub(crate) async fn get_room_media_route(
 			let skip = before_ts.is_some_and(|before| *ts > before);
 			async move { skip }
 		})
-		.map(|(pdu_id, _)| pdu_id)
-		.filter_map(async |pdu_id| {
+		.enumerate()
+		.skip(usize::try_from(first).unwrap_or(usize::MAX))
+		.map(|(place, (pdu_id, _))| (u64::try_from(place).unwrap_or(u64::MAX), pdu_id))
+		.filter_map(async |(place, pdu_id)| {
+			looked.fetch_max(place + 1, std::sync::atomic::Ordering::Relaxed);
 			let pdu = services
 				.timeline
 				.get_pdu_from_id(&pdu_id)
@@ -153,23 +176,28 @@ pub(crate) async fn get_room_media_route(
 					.state_accessor
 					.user_can_see_event(sender_user, room_id, pdu.event_id())
 					.await)
-				.then_some((pdu_id.pdu_count(), pdu))
+				.then_some((pdu_id.pdu_count(), place, pdu))
 		})
 		.take(limit)
 		.collect()
 		.await;
 
+	let positions = skip.map(|_| events.iter().map(|(_, place, _)| *place).collect());
+	let next_position = skip.map(|_| looked.into_inner());
+
 	// Where the next page continues, or nothing once this one wasn't full.
 	let end = (events.len() == limit)
-		.then(|| events.last().map(|(count, _)| count.to_string()))
+		.then(|| events.last().map(|(count, ..)| count.to_string()))
 		.flatten();
 
 	Ok(Response {
 		chunk: events
 			.into_iter()
-			.map(|(_, pdu)| pdu.into_format())
+			.map(|(.., pdu)| pdu.into_format())
 			.collect(),
 		end,
+		positions,
+		next_position,
 		months: Vec::new(),
 	})
 }
@@ -194,7 +222,13 @@ async fn month_counts(
 		}
 	}
 
-	Ok(Response { chunk: Vec::new(), end: None, months })
+	Ok(Response {
+		chunk: Vec::new(),
+		end: None,
+		positions: None,
+		next_position: None,
+		months,
+	})
 }
 
 /// `YYYY-MM` in UTC for a time in milliseconds, which is how a client labels the months.
