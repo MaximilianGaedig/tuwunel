@@ -23,7 +23,8 @@ jobs:
           extra_nix_config: |
             accept-flake-config = true
       - name: Test account data forwarding
-        run: nix develop --impure .#dynamic --command cargo test -p tuwunel_service --lib account_data
+        # The dev shell links RocksDB dynamically but doesn't put it on the loader path.
+        run: nix develop --impure .#dynamic --command bash -c 'LD_LIBRARY_PATH="$ROCKSDB_LIB_DIR" cargo test -p tuwunel_service --lib account_data'
       - name: Build static binary
         run: nix build --impure -L .#static-x86_64-linux-musl
       - name: Collect binary
