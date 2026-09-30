@@ -184,7 +184,8 @@ mod tests {
 		assert!(is_bridged(None, "m.ignored_user_list"));
 		assert!(!is_bridged(None, "m.tag"), "tags are room data");
 		assert!(!is_bridged(Some(room), "m.fully_read"));
-		assert!(!is_bridged(None, "m.push_rules"), "the user's other account data stays private");
+		assert!(is_bridged(None, "m.push_rules"), "push rules carry room mutes");
+		assert!(!is_bridged(None, "m.direct"), "the user's other account data stays private");
 	}
 
 	#[test]
