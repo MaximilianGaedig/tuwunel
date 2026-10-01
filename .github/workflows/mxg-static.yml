@@ -22,9 +22,11 @@ jobs:
         with:
           extra_nix_config: |
             accept-flake-config = true
-      - name: Test account data forwarding and the media index
+      - name: Test account data forwarding and the indexes
         # The dev shell links RocksDB (and so libstdc++) dynamically but doesn't put them on the loader path.
-        run: nix develop --impure .#dynamic --command bash -c 'LD_LIBRARY_PATH="$ROCKSDB_LIB_DIR:$(dirname "$(c++ -print-file-name=libstdc++.so.6)")" cargo test -p tuwunel_service --lib -- account_data media_index activity_log'
+        # The words are matched against each test's path: `rooms::search::tests` rather than `search`,
+        # which would also pick up every other test with the word in its name.
+        run: nix develop --impure .#dynamic --command bash -c 'LD_LIBRARY_PATH="$ROCKSDB_LIB_DIR:$(dirname "$(c++ -print-file-name=libstdc++.so.6)")" cargo test -p tuwunel_service --lib -- account_data media_index activity_log room_stats rooms::search::tests'
       - name: Build static binary
         run: nix build --impure -L .#static-x86_64-linux-musl
       - name: Collect binary
@@ -33,3 +35,21 @@ jobs:
         with:
           name: tuwunel-static-x86_64-${{ github.sha }}
           path: tuwunel
+
+  # The tests under src/main/tests start a whole server in-process. Upstream runs them in its docker
+  # bake on its own runners, which never start here, so the fork's own are run by name. A job of its
+  # own: it compiles every crate for tests, and the build above should not wait for that or be
+  # stopped by it.
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            accept-flake-config = true
+      - name: Test the activity log through a running server
+        run: nix develop --impure .#dynamic --command bash -c 'LD_LIBRARY_PATH="$ROCKSDB_LIB_DIR:$(dirname "$(c++ -print-file-name=libstdc++.so.6)")" cargo test -p tuwunel --test activity_log'
