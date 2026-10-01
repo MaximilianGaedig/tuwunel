@@ -9,6 +9,7 @@ pub mod services;
 mod test_utils;
 
 pub mod account_data;
+pub mod activity_log;
 pub mod admin;
 pub mod appservice;
 pub mod client;

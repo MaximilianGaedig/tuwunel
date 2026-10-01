@@ -482,6 +482,10 @@ pub async fn backfill_pdu(
 		.room_stats
 		.count_pdu(shortroomid, &pdu);
 
+	self.services
+		.activity_log
+		.log_pdu(shortroomid, &pdu);
+
 	match pdu.kind {
 		| TimelineEventType::RoomMessage => {
 			if let Ok(ExtractBody { body: Some(body) }) = pdu.get_content() {

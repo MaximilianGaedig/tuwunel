@@ -209,6 +209,10 @@ async fn prepend_batch(&self, room_id: &RoomId, events: Vec<BatchEvent>) -> Resu
 			.room_stats
 			.count_pdu(shortroomid, &pdu);
 
+		self.services
+			.activity_log
+			.log_pdu(shortroomid, &pdu);
+
 		self.index_text(shortroomid, &pdu_id, &pdu);
 	}
 

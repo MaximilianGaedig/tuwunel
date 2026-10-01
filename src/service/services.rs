@@ -9,7 +9,7 @@ use tuwunel_database::Database;
 
 pub(crate) use crate::OnceServices;
 use crate::{
-	account_data, admin, appservice, client, config, deactivate, emergency, federation, fetcher,
+	account_data, activity_log, admin, appservice, client, config, deactivate, emergency, federation, fetcher,
 	globals, key_backups,
 	manager::Manager,
 	media, membership, oauth, presence, profile, pusher, registration_tokens, rendezvous,
@@ -22,6 +22,7 @@ use crate::{
 
 pub struct Services {
 	pub account_data: Arc<account_data::Service>,
+	pub activity_log: Arc<activity_log::Service>,
 	pub admin: Arc<admin::Service>,
 	pub appservice: Arc<appservice::Service>,
 	pub config: Arc<config::Service>,
@@ -92,6 +93,7 @@ pub async fn build(server: Arc<Server>) -> Result<Arc<Self>> {
 
 	let res = Arc::new(Self {
 		account_data: account_data::Service::build(&args)?,
+		activity_log: activity_log::Service::build(&args)?,
 		admin: admin::Service::build(&args)?,
 		appservice: appservice::Service::build(&args)?,
 		resolver: resolver::Service::build(&args)?,
@@ -209,6 +211,7 @@ pub(crate) fn services(&self) -> impl Iterator<Item = Arc<dyn Service>> + Send {
 		cast!(self.retention),
 		cast!(self.room_stats),
 		cast!(self.media_index),
+		cast!(self.activity_log),
 		cast!(self.registration_tokens),
 		cast!(self.rendezvous),
 		cast!(self.profile),

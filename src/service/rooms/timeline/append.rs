@@ -272,6 +272,10 @@ pub(super) async fn append_pdu_effects(
 		.room_stats
 		.count_pdu(shortroomid, pdu);
 
+	self.services
+		.activity_log
+		.log_pdu(shortroomid, pdu);
+
 	match *pdu.kind() {
 		| TimelineEventType::RoomRedaction => {
 			let room_version = self

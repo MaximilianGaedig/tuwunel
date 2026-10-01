@@ -87,6 +87,11 @@ impl Service {
 			trace!("receiver found what it was looking for and is no longer interested");
 		}
 
+		self.services
+			.activity_log
+			.log_typing(user_id, room_id)
+			.await;
+
 		// update appservices
 		let appservice_send = self.appservice_send(room_id);
 

@@ -442,6 +442,7 @@ fn register_client_media_index_routes(router: Router<State>) -> Router<State> {
 		.ruma_route(&client::batch_send_route)
 		.ruma_route(&client::get_room_stats_route)
 		.ruma_route(&client::get_storage_route)
+		.ruma_route(&client::get_user_activity_route)
 }
 
 fn register_client_misc_routes(router: Router<State>) -> Router<State> {

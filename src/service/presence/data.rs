@@ -121,6 +121,13 @@ impl Data {
 			self.presenceid_presence.remove(&key);
 		}
 
+		// This row replaces the last one; the log is what keeps when they came and went.
+		if state_changed {
+			self.services
+				.activity_log
+				.log_presence(user_id, presence_state, last_active_ts);
+		}
+
 		Ok(Some(*count))
 	}
 

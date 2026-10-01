@@ -108,6 +108,11 @@ impl Service {
 		}
 
 		self.services
+			.activity_log
+			.log_read(user_id, room_id)
+			.await;
+
+		self.services
 			.sending
 			.send_edu_room_appservices(room_id, |buf| {
 				let edu = EphemeralData::Receipt(ReceiptEvent {
