@@ -105,6 +105,9 @@ concurrency:
 jobs:
   init:
     name: Init
+    # Fork: this pipeline drives upstream's self-hosted runners and registries. The fork's own
+    # pipeline is mxg-static.yml.
+    if: github.repository == 'matrix-construct/tuwunel'
     runs-on: ${{matrix.runner}}
     env:
       default_cargo_profiles: '["test", "bench", "release"]'
@@ -233,6 +236,7 @@ jobs:
 
   lint:
     if: >
+      github.repository == 'matrix-construct/tuwunel' &&
       !failure() && !cancelled()
       && fromJSON(needs.init.outputs.enable_lint)
       && !fromJSON(needs.init.outputs.is_release)
@@ -286,6 +290,7 @@ jobs:
 
   test:
     if: >
+      github.repository == 'matrix-construct/tuwunel' &&
       !failure() && !cancelled()
       && fromJSON(needs.init.outputs.enable_test)
       && !fromJSON(needs.init.outputs.is_release)
@@ -364,6 +369,7 @@ jobs:
 
   package:
     if: >
+      github.repository == 'matrix-construct/tuwunel' &&
       !cancelled() && needs.init.result == 'success'
       && fromJSON(needs.init.outputs.enable_package)
       && !contains(needs.init.outputs.pipeline, '[ci only it]')
@@ -436,6 +442,7 @@ jobs:
 
   publish:
     if: >
+      github.repository == 'matrix-construct/tuwunel' &&
       !failure() && !cancelled()
       && fromJSON(needs.init.outputs.enable_publish)
       && !contains(needs.init.outputs.pipeline, '[ci only it]')
@@ -445,6 +452,10 @@ jobs:
 
     name: Publish
     needs: [init, test, package]
+    # Fork: publish.yml's jobs ask for write permissions. GitHub checks that when it loads the
+    # workflow, before any `if`, and a repository whose default token is read-only fails the whole
+    # run with startup_failure unless the caller grants them.
+    permissions: write-all
     uses: ./.github/workflows/publish.yml
     with:
       checkout: ${{needs.init.outputs.checkout}}
