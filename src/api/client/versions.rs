@@ -81,9 +81,11 @@ static VERSIONS: [&str; 27] = [
 	"v1.19",  /* mutual rooms (MSC2666) */
 ];
 
-static UNSTABLE_FEATURES: [&str; 47] = [
+static UNSTABLE_FEATURES: [&str; 48] = [
 	// when each person was around: presence changes, events sent, typing, read receipts
 	"im.mxg.activity",
+	// a room's events in large pages, and a manifest of its files, for exporting a chat
+	"im.mxg.export",
 	// a room's media, files, links, music and voice lists, from an index
 	"im.mxg.media_index",
 	// what media says: text read off a picture, what a voice message said

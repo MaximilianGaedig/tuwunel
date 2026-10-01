@@ -3,6 +3,7 @@ pub mod auth_chain;
 pub mod delete;
 pub mod directory;
 pub mod event_handler;
+pub mod export;
 pub mod lazy_loading;
 pub mod media_index;
 pub mod media_text;
