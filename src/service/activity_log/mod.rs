@@ -431,7 +431,9 @@ impl WeekFold {
 					self.online_since = Some(entry.ts);
 				},
 			| Kind::Unavailable | Kind::Offline => self.close(entry.ts),
-			| Kind::Sent | Kind::Typing | Kind::Read | Kind::Reaction => self.seen_at(entry.ts),
+			| Kind::Sent | Kind::Typing | Kind::Read | Kind::Reaction => {
+				self.seen_at(entry.ts);
+			},
 		}
 	}
 
