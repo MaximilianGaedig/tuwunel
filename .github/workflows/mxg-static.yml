@@ -26,7 +26,7 @@ jobs:
         # The dev shell links RocksDB (and so libstdc++) dynamically but doesn't put them on the loader path.
         # The words are matched against each test's path: `rooms::search::tests` rather than `search`,
         # which would also pick up every other test with the word in its name.
-        run: nix develop --impure .#dynamic --command bash -c 'LD_LIBRARY_PATH="$ROCKSDB_LIB_DIR:$(dirname "$(c++ -print-file-name=libstdc++.so.6)")" cargo test -p tuwunel_service --lib -- account_data media_index activity_log room_stats rooms::search::tests rooms::export::tests'
+        run: nix develop --impure .#dynamic --command bash -c 'LD_LIBRARY_PATH="$ROCKSDB_LIB_DIR:$(dirname "$(c++ -print-file-name=libstdc++.so.6)")" cargo test -p tuwunel_service --lib -- account_data media_index activity_log room_stats rooms::search::tests rooms::export::tests rooms::typing::tests'
       - name: Build static binary
         run: nix build --impure -L .#static-x86_64-linux-musl
       - name: Collect binary

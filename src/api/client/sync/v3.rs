@@ -24,11 +24,10 @@ use ruma::{
 	},
 	events::{
 		AnyGlobalAccountDataEvent, AnyRawAccountDataEvent, AnyRoomAccountDataEvent,
-		AnySyncEphemeralRoomEvent, AnySyncStateEvent, StateEventType, SyncEphemeralRoomEvent,
+		AnySyncEphemeralRoomEvent, AnySyncStateEvent, StateEventType,
 		TimelineEventType::*,
 		presence::{PresenceEvent, PresenceEventContent},
 		room::member::{MembershipState, RoomMemberEventContent},
-		typing::TypingEventContent,
 	},
 	serde::Raw,
 	uint,
@@ -2444,19 +2443,18 @@ async fn filter_hero<Pdu: Event>(
 	is_hero.await.then(|| user_id.to_owned())
 }
 
+/// The `m.typing` event for this user, as JSON: ruma's typing content has no
+/// field for what the typing users are doing.
 async fn typings_event_for_user(
 	services: &Services,
 	room_id: &RoomId,
 	sender_user: &UserId,
-) -> Result<SyncEphemeralRoomEvent<TypingEventContent>> {
-	Ok(SyncEphemeralRoomEvent {
-		content: TypingEventContent {
-			user_ids: services
-				.typing
-				.typing_users_for_user(room_id, sender_user)
-				.await?,
-		},
-	})
+) -> Result<serde_json::Value> {
+	services
+		.typing
+		.typing_users_for_user(room_id, sender_user)
+		.await
+		.map(|typing| typing.sync_event())
 }
 
 #[cfg(test)]

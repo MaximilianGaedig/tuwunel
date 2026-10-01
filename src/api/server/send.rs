@@ -46,7 +46,10 @@ use tuwunel_core::{
 };
 use tuwunel_service::{
 	Services,
-	rooms::state_res::{is_topologically_sorted_in_place, topological_sort},
+	rooms::{
+		state_res::{is_topologically_sorted_in_place, topological_sort},
+		typing::TypingKind,
+	},
 	sending::{EDU_LIMIT, PDU_LIMIT},
 	users::DeviceListChange,
 };
@@ -615,9 +618,10 @@ async fn handle_edu_typing(
 		let secs = services.server.config.typing_federation_timeout_s;
 		let timeout = millis_since_unix_epoch().saturating_add(secs.saturating_mul(1000));
 
+		// The federation EDU says only that the user is typing.
 		services
 			.typing
-			.typing_add(&typing.user_id, &typing.room_id, timeout)
+			.typing_add(&typing.user_id, &typing.room_id, timeout, TypingKind::Text)
 			.await
 			.log_err()
 			.ok();

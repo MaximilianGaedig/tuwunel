@@ -4,7 +4,7 @@ use futures::{FutureExt, StreamExt, TryFutureExt};
 use ruma::{
 	OwnedRoomId,
 	api::client::sync::sync_events::v5::response::{self, Typing},
-	events::typing::{SyncTypingEvent, TypingEventContent},
+	events::typing::SyncTypingEvent,
 	serde::Raw,
 };
 use tuwunel_core::{
@@ -88,7 +88,7 @@ pub(super) async fn collect(
 				eligibility(update_token, conn.globalsince, conn.next_batch, roomsince, has_users)
 			};
 
-			let (update_token, users) = services
+			let (update_token, typing) = services
 				.typing
 				.typing_snapshot_for_user(room_id, sender_user, |update_token| {
 					eligible(update_token, true).is_some()
@@ -97,15 +97,13 @@ pub(super) async fn collect(
 				.await
 				.ok()??;
 
-			let initial_only = eligible(update_token, !users.is_empty())?;
+			let initial_only = eligible(update_token, !typing.user_ids.is_empty())?;
 
-			let content = TypingEventContent::new(users);
-			let event = SyncTypingEvent { content };
-			let event = Raw::new(&event);
+			// Built from JSON rather than ruma's typing content, which has no field
+			// for what the typing users are doing.
+			let event: Raw<SyncTypingEvent> = Raw::from_json_value(&typing.sync_event());
 
-			event
-				.ok()
-				.map(|event| (room_id.to_owned(), CollectedRoom { event, initial_only }))
+			Some((room_id.to_owned(), CollectedRoom { event, initial_only }))
 		})
 		.collect::<CollectedRooms>()
 		.map(|rooms| Collected { rooms })
@@ -141,7 +139,7 @@ fn eligibility(
 mod tests {
 	use ruma::{
 		OwnedUserId, RoomId, api::client::sync::sync_events::v5::response::Room as ResponseRoom,
-		room_id, user_id,
+		events::typing::TypingEventContent, room_id, user_id,
 	};
 
 	use super::*;
