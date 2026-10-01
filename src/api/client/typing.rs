@@ -1,13 +1,17 @@
 use axum::extract::State;
 use ruma::api::client::typing::create_typing_event;
 use tuwunel_core::{Err, Result, utils, utils::math::Tried};
-use tuwunel_service::presence::Ping;
+use tuwunel_service::{presence::Ping, rooms::typing::TypingKind};
 
 use crate::{ClientIp, Ruma};
 
 /// # `PUT /_matrix/client/r0/rooms/{roomId}/typing/{userId}`
 ///
 /// Sets the typing state of the sender user.
+///
+/// - `im.mxg.typing.kind` in the body says what the user is doing (recording a
+///   voice message, sending a photo); without it, or with a kind this server
+///   does not know, they are typing text
 pub(crate) async fn create_typing_event_route(
 	State(services): State<crate::State>,
 	ClientIp(client): ClientIp,
@@ -54,6 +58,7 @@ pub(crate) async fn create_typing_event_route(
 					utils::millis_since_unix_epoch()
 						.checked_add(duration)
 						.expect("user typing timeout should not get this high"),
+					TypingKind::from_request_body(body.json_body.as_ref()),
 				)
 				.await?;
 		},

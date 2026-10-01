@@ -2,16 +2,12 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use futures::{FutureExt, TryStreamExt, future::try_join};
 use ruma::{
-	OwnedRoomId, OwnedUserId, RoomId, UserId,
-	api::{
-		appservice::event::push_events::v1::EphemeralData,
-		federation::transactions::edu::{Edu, TypingContent},
-	},
-	events::{
-		EphemeralRoomEvent, GlobalAccountDataEventType, ignored_user_list::IgnoredUserListEvent,
-		typing::TypingEventContent,
-	},
+	CanonicalJsonValue, OwnedRoomId, OwnedUserId, RoomId, UserId,
+	api::federation::transactions::edu::{Edu, TypingContent},
+	events::{GlobalAccountDataEventType, ignored_user_list::IgnoredUserListEvent},
 };
+use serde::{Serialize, Serializer};
+use serde_json::{Value as JsonValue, json};
 use tokio::sync::{RwLock, broadcast};
 use tuwunel_core::{
 	Result, Server,
@@ -29,13 +25,162 @@ pub struct Service {
 	pub typing_update_sender: broadcast::Sender<OwnedRoomId>,
 }
 
+/// The field of the typing request's body that says what the user is doing.
+pub const TYPING_KIND_FIELD: &str = "im.mxg.typing.kind";
+
+/// What a typing user is doing. Other networks tell their users that a contact
+/// is recording a voice message or sending a photo; `m.typing` alone can only
+/// say "typing", so the kind travels beside it.
+///
+/// The vocabulary is closed. Anything else read off the wire is plain typing,
+/// so a newer client's kind degrades to what `m.typing` always meant instead
+/// of failing the request.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TypingKind {
+	#[default]
+	Text,
+	RecordingVoice,
+	RecordingVideo,
+	UploadingPhoto,
+	UploadingVideo,
+	UploadingFile,
+	UploadingVoice,
+	ChoosingSticker,
+}
+
+impl TypingKind {
+	/// Reads a kind as written on the wire; an unknown one is plain typing.
+	#[must_use]
+	pub fn parse(kind: &str) -> Self {
+		match kind {
+			| "recording_voice" => Self::RecordingVoice,
+			| "recording_video" => Self::RecordingVideo,
+			| "uploading_photo" => Self::UploadingPhoto,
+			| "uploading_video" => Self::UploadingVideo,
+			| "uploading_file" => Self::UploadingFile,
+			| "uploading_voice" => Self::UploadingVoice,
+			| "choosing_sticker" => Self::ChoosingSticker,
+			| _ => Self::Text,
+		}
+	}
+
+	/// Reads the kind out of a typing request's body.
+	///
+	/// Ruma's request type has no field for it, so it is taken from the parsed
+	/// JSON. A missing body, a missing field or one that is not a string are
+	/// all plain typing.
+	#[must_use]
+	pub fn from_request_body(body: Option<&CanonicalJsonValue>) -> Self {
+		body.and_then(CanonicalJsonValue::as_object)
+			.and_then(|body| body.get(TYPING_KIND_FIELD))
+			.and_then(CanonicalJsonValue::as_str)
+			.map(Self::parse)
+			.unwrap_or_default()
+	}
+
+	/// The kind as written on the wire.
+	#[must_use]
+	pub const fn as_str(self) -> &'static str {
+		match self {
+			| Self::Text => "text",
+			| Self::RecordingVoice => "recording_voice",
+			| Self::RecordingVideo => "recording_video",
+			| Self::UploadingPhoto => "uploading_photo",
+			| Self::UploadingVideo => "uploading_video",
+			| Self::UploadingFile => "uploading_file",
+			| Self::UploadingVoice => "uploading_voice",
+			| Self::ChoosingSticker => "choosing_sticker",
+		}
+	}
+}
+
+impl Serialize for TypingKind {
+	fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+	where
+		S: Serializer,
+	{
+		serializer.serialize_str(self.as_str())
+	}
+}
+
+/// The content of an `m.typing` event: who is typing, and for those doing
+/// something other than typing text, what.
+///
+/// This replaces ruma's `TypingEventContent`, which has nowhere to put the
+/// kinds. A room where everybody types text serializes exactly as before, so
+/// clients and appservices that know nothing of kinds see no difference.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct TypingUsers {
+	pub user_ids: Vec<OwnedUserId>,
+
+	#[serde(
+		rename = "im.mxg.typing.kinds",
+		skip_serializing_if = "BTreeMap::is_empty"
+	)]
+	pub kinds: BTreeMap<OwnedUserId, TypingKind>,
+}
+
+impl TypingUsers {
+	/// Lists every user as typing, and in `kinds` only those not typing text.
+	pub fn new<Users>(users: Users) -> Self
+	where
+		Users: IntoIterator<Item = (OwnedUserId, TypingKind)>,
+	{
+		let mut content = Self::default();
+		for (user_id, kind) in users {
+			if kind != TypingKind::Text {
+				content.kinds.insert(user_id.clone(), kind);
+			}
+
+			content.user_ids.push(user_id);
+		}
+
+		content
+	}
+
+	/// The `m.typing` event as a client receives it in a sync response.
+	#[must_use]
+	pub fn sync_event(&self) -> JsonValue {
+		json!({
+			"type": "m.typing",
+			"content": self,
+		})
+	}
+
+	/// The `m.typing` event as an appservice receives it, naming its room.
+	#[must_use]
+	pub fn room_event(&self, room_id: &RoomId) -> JsonValue {
+		json!({
+			"type": "m.typing",
+			"content": self,
+			"room_id": room_id.as_str(),
+		})
+	}
+}
+
+#[derive(Clone, Copy)]
+struct Typing {
+	// Unix epoch millisecond timestamp when the typing indicator expires.
+	timeout: u64,
+	// Kept with the timeout so that it goes when the typing does, whether the
+	// user stops or times out.
+	kind: TypingKind,
+}
+
 #[derive(Default)]
 struct RoomTyping {
-	// Unix epoch millisecond timestamp when each typing indicator expires.
-	users: BTreeMap<OwnedUserId, u64>,
+	users: BTreeMap<OwnedUserId, Typing>,
 	// Global stream position of the last change to this room. The count permit must
 	// retire only after releasing the typing state lock.
 	update: u64,
+}
+
+impl RoomTyping {
+	fn users(&self) -> impl Iterator<Item = (OwnedUserId, TypingKind)> + '_ {
+		self.users
+			.iter()
+			.map(|(user_id, typing)| (user_id.clone(), typing.kind))
+	}
 }
 
 impl crate::Service for Service {
@@ -53,7 +198,8 @@ impl crate::Service for Service {
 
 impl Service {
 	/// Sets a user as typing until the timeout timestamp is reached or
-	/// roomtyping_remove is called.
+	/// roomtyping_remove is called. Calling it again for a user who is already
+	/// typing replaces the kind as well as the timeout.
 	#[tracing::instrument(
 		name = "typing_start"
 		level = INFO_SPAN_LEVEL,
@@ -64,13 +210,22 @@ impl Service {
 			%timeout,
 		)
 	)]
-	pub async fn typing_add(&self, user_id: &UserId, room_id: &RoomId, timeout: u64) -> Result {
-		debug_info!("typing started {user_id:?} in {room_id:?} timeout:{timeout:?}");
+	pub async fn typing_add(
+		&self,
+		user_id: &UserId,
+		room_id: &RoomId,
+		timeout: u64,
+		kind: TypingKind,
+	) -> Result {
+		debug_info!(
+			"typing started {user_id:?} in {room_id:?} timeout:{timeout:?} kind:{kind:?}"
+		);
 
 		// update clients
 		let mut typing = self.typing.write().await;
 		let room = typing.entry(room_id.to_owned()).or_default();
-		room.users.insert(user_id.to_owned(), timeout);
+		room.users
+			.insert(user_id.to_owned(), Typing { timeout, kind });
 
 		let count = self.services.globals.next_count();
 
@@ -173,7 +328,7 @@ impl Service {
 		let has_expired = typing.get(room_id).is_some_and(|room| {
 			room.users
 				.values()
-				.any(|timeout| *timeout < current_timestamp)
+				.any(|typing| typing.timeout < current_timestamp)
 		});
 
 		drop(typing);
@@ -189,8 +344,8 @@ impl Service {
 			return Ok(());
 		};
 
-		room.users.retain(|user, timeout| {
-			let expired = *timeout < current_timestamp;
+		room.users.retain(|user, typing| {
+			let expired = typing.timeout < current_timestamp;
 			if expired {
 				removable.push(user.clone());
 			}
@@ -252,31 +407,28 @@ impl Service {
 	}
 
 	/// Returns the typing content with all typing users in the room.
-	async fn typings_content(&self, room_id: &RoomId) -> TypingEventContent {
+	async fn typings_content(&self, room_id: &RoomId) -> TypingUsers {
 		let typing = self.typing.read().await;
-		let user_ids = typing
+		let users = typing
 			.get(room_id)
 			.into_iter()
-			.flat_map(|room| room.users.keys().cloned())
-			.collect();
+			.flat_map(|room| room.users());
 
-		TypingEventContent { user_ids }
+		TypingUsers::new(users)
 	}
 
 	/// Sends a typing EDU to all appservices interested in the room.
 	async fn appservice_send(&self, room_id: &RoomId) -> Result {
-		let content = self.typings_content(room_id).await;
+		// Written by hand rather than through ruma's `EphemeralData`, whose typing
+		// content cannot carry the kinds.
+		let edu = self
+			.typings_content(room_id)
+			.await
+			.room_event(room_id);
 
 		self.services
 			.sending
-			.send_edu_room_appservices(room_id, |buf| {
-				let edu = EphemeralData::Typing(EphemeralRoomEvent {
-					room_id: room_id.to_owned(),
-					content: content.clone(),
-				});
-
-				Ok(serde_json::to_writer(buf, &edu)?)
-			})
+			.send_edu_room_appservices(room_id, |buf| Ok(serde_json::to_writer(buf, &edu)?))
 			.await
 	}
 
@@ -285,18 +437,18 @@ impl Service {
 		&self,
 		room_id: &RoomId,
 		sender_user: &UserId,
-	) -> Result<Vec<OwnedUserId>> {
+	) -> Result<TypingUsers> {
 		let typing = self.typing.read().await;
-		let user_ids = typing
+		let users: Vec<_> = typing
 			.get(room_id)
 			.into_iter()
-			.flat_map(|room| room.users.keys().cloned())
+			.flat_map(|room| room.users())
 			.collect();
 		drop(typing);
 
-		Ok(self
-			.filter_typing_users(user_ids, sender_user)
-			.await)
+		let users = self.filter_typing_users(users, sender_user).await;
+
+		Ok(TypingUsers::new(users))
 	}
 
 	/// Returns one coherent typing update token and visible user snapshot.
@@ -309,7 +461,7 @@ impl Service {
 		room_id: &RoomId,
 		sender_user: &UserId,
 		select: Select,
-	) -> Result<Option<(u64, Vec<OwnedUserId>)>>
+	) -> Result<Option<(u64, TypingUsers)>>
 	where
 		Select: FnOnce(u64) -> bool + Send,
 	{
@@ -323,27 +475,25 @@ impl Service {
 			return Ok(None);
 		}
 
-		let user_ids = room
+		let users: Vec<_> = room
 			.into_iter()
-			.flat_map(|room| room.users.keys().cloned())
+			.flat_map(|room| room.users())
 			.collect();
 
 		drop(typing);
 
-		let user_ids = self
-			.filter_typing_users(user_ids, sender_user)
-			.await;
+		let users = self.filter_typing_users(users, sender_user).await;
 
-		Ok(Some((update, user_ids)))
+		Ok(Some((update, TypingUsers::new(users))))
 	}
 
 	async fn filter_typing_users(
 		&self,
-		user_ids: Vec<OwnedUserId>,
+		users: Vec<(OwnedUserId, TypingKind)>,
 		sender_user: &UserId,
-	) -> Vec<OwnedUserId> {
-		if user_ids.is_empty() {
-			return user_ids;
+	) -> Vec<(OwnedUserId, TypingKind)> {
+		if users.is_empty() {
+			return users;
 		}
 
 		let ignored: Option<IgnoredUserListEvent> = self
@@ -353,9 +503,9 @@ impl Service {
 			.await
 			.ok();
 
-		user_ids
+		users
 			.into_iter()
-			.filter(|user_id| {
+			.filter(|(user_id, _)| {
 				ignored.as_ref().is_none_or(|ignored| {
 					!ignored
 						.content
@@ -366,6 +516,8 @@ impl Service {
 			.collect()
 	}
 
+	/// The kind is deliberately left out: the federation EDU has no field for
+	/// it, so other servers see plain typing.
 	async fn federation_send(&self, room_id: &RoomId, user_id: &UserId, typing: bool) -> Result {
 		debug_assert!(
 			self.services.globals.user_is_local(user_id),
@@ -388,5 +540,126 @@ impl Service {
 			.await?;
 
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use ruma::{CanonicalJsonValue, OwnedUserId, room_id, user_id};
+	use serde_json::json;
+
+	use super::{TypingKind, TypingUsers};
+
+	const KINDS: [TypingKind; 8] = [
+		TypingKind::Text,
+		TypingKind::RecordingVoice,
+		TypingKind::RecordingVideo,
+		TypingKind::UploadingPhoto,
+		TypingKind::UploadingVideo,
+		TypingKind::UploadingFile,
+		TypingKind::UploadingVoice,
+		TypingKind::ChoosingSticker,
+	];
+
+	fn ada() -> OwnedUserId { user_id!("@ada:example.com").to_owned() }
+
+	fn grace() -> OwnedUserId { user_id!("@grace:example.com").to_owned() }
+
+	fn body(json: serde_json::Value) -> CanonicalJsonValue {
+		serde_json::from_value(json).expect("canonical JSON")
+	}
+
+	#[test]
+	fn typing_kind_survives_the_wire() {
+		for kind in KINDS {
+			assert_eq!(TypingKind::parse(kind.as_str()), kind);
+		}
+	}
+
+	#[test]
+	fn typing_kind_unknown_is_text() {
+		assert_eq!(TypingKind::parse("playing_a_game"), TypingKind::Text);
+		assert_eq!(TypingKind::parse(""), TypingKind::Text);
+		assert_eq!(TypingKind::parse("Recording_Voice"), TypingKind::Text);
+	}
+
+	#[test]
+	fn typing_kind_is_read_from_the_request_body() {
+		let recording = body(json!({
+			"typing": true,
+			"timeout": 30000,
+			"im.mxg.typing.kind": "recording_voice",
+		}));
+
+		assert_eq!(TypingKind::from_request_body(Some(&recording)), TypingKind::RecordingVoice);
+	}
+
+	#[test]
+	fn typing_kind_missing_or_malformed_is_text() {
+		let plain = body(json!({ "typing": true, "timeout": 30000 }));
+		let unknown = body(json!({ "typing": true, "im.mxg.typing.kind": "playing_a_game" }));
+		let number = body(json!({ "typing": true, "im.mxg.typing.kind": 3 }));
+		let object = body(json!({ "typing": true, "im.mxg.typing.kind": { "a": "b" } }));
+		let array = body(json!(["recording_voice"]));
+
+		assert_eq!(TypingKind::from_request_body(None), TypingKind::Text);
+		for request in [plain, unknown, number, object, array] {
+			assert_eq!(
+				TypingKind::from_request_body(Some(&request)),
+				TypingKind::Text,
+				"{request:?}"
+			);
+		}
+	}
+
+	#[test]
+	fn typing_kinds_list_only_users_not_typing_text() {
+		let content =
+			TypingUsers::new([(ada(), TypingKind::RecordingVoice), (grace(), TypingKind::Text)]);
+
+		assert_eq!(content.user_ids, [ada(), grace()]);
+		assert_eq!(
+			serde_json::to_value(&content).expect("typing content serializes"),
+			json!({
+				"user_ids": ["@ada:example.com", "@grace:example.com"],
+				"im.mxg.typing.kinds": { "@ada:example.com": "recording_voice" },
+			}),
+		);
+	}
+
+	#[test]
+	fn typing_without_kinds_is_the_plain_event() {
+		let content = TypingUsers::new([(ada(), TypingKind::Text)]);
+
+		assert_eq!(
+			serde_json::to_value(&content).expect("typing content serializes"),
+			json!({ "user_ids": ["@ada:example.com"] }),
+		);
+
+		let nobody = TypingUsers::new(Vec::new());
+
+		assert_eq!(
+			serde_json::to_value(&nobody).expect("typing content serializes"),
+			json!({ "user_ids": [] }),
+		);
+	}
+
+	#[test]
+	fn typing_events_carry_the_kinds_to_clients_and_appservices() {
+		let content = TypingUsers::new([(ada(), TypingKind::UploadingPhoto)]);
+		let inner = json!({
+			"user_ids": ["@ada:example.com"],
+			"im.mxg.typing.kinds": { "@ada:example.com": "uploading_photo" },
+		});
+
+		assert_eq!(content.sync_event(), json!({ "type": "m.typing", "content": inner }));
+		assert_eq!(
+			content.room_event(room_id!("!room:example.com")),
+			json!({
+				"type": "m.typing",
+				"content": inner,
+				"room_id": "!room:example.com",
+			}),
+		);
 	}
 }
