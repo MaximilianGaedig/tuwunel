@@ -19,11 +19,11 @@ use ruma::{
 };
 use serde::Deserialize;
 use tuwunel_core::{
-	Result, implement,
+	Result, error, implement, info,
 	matrix::Event,
 	utils::{ReadyExt, stream::TryIgnore},
 };
-use tuwunel_database::Map;
+use tuwunel_database::{Deserialized, Map};
 
 use crate::rooms::short::ShortRoomId;
 
@@ -61,6 +61,47 @@ const BATCH_MAX: usize = 2000;
 
 struct Data {
 	roomstats: Arc<Map>,
+	global: Arc<Map>,
+}
+
+/// Which rules the counters were built by. Raise it whenever [`class_of`] sorts any message
+/// differently, or what is counted beside the class changes: history counted by the old rules is
+/// then counted again on the next start, without anyone having to ask.
+///
+/// 1. text, image, video, audio, voice, file, sticker, encrypted and link, with bytes, months and
+///    hours of the week.
+const STATS_VERSION: u64 = 1;
+const STATS_VERSION_KEY: &[u8] = b"room_stats_version";
+
+/// What startup does about the counters.
+#[derive(Debug, Eq, PartialEq)]
+enum Startup {
+	/// Counted from the whole history, by the current rules.
+	Current,
+	/// Count the history again.
+	Rebuild,
+	/// Already counted from the whole history, before versions were recorded: write the version
+	/// down, change nothing.
+	Adopt,
+}
+
+/// Decides what to do with counters whose stored version is `stored`, given whether they were ever
+/// rebuilt from the whole history (`complete`, the row under [`READY_KEY`]).
+///
+/// An absent version means one of two things. The live server's counters were rebuilt long before
+/// versions existed and are whole: counting years of history again for the sake of a new
+/// bookkeeping key would show every room's numbers climbing back from zero for nothing. Counters
+/// that were never rebuilt have no version either, and hold only what arrived since they were
+/// deployed, so they do need it. Having rows cannot tell the two apart - both have them - but the
+/// completeness row can: only a finished rebuild writes it, and a rebuild clears it first. That
+/// also makes a rebuild that stopped part-way read as not done, whatever version is stored.
+const fn startup_action(stored: Option<u64>, complete: bool) -> Startup {
+	match stored {
+		| _ if !complete => Startup::Rebuild,
+		| Some(version) if version >= STATS_VERSION => Startup::Current,
+		| Some(_) => Startup::Rebuild,
+		| None => Startup::Adopt,
+	}
 }
 
 /// What kind of message it was. The byte is part of the key, so the values are
@@ -177,7 +218,10 @@ impl crate::Service for Service {
 	fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
 		let (queue, inbox) = unbounded_channel();
 		Ok(Arc::new(Self {
-			db: Data { roomstats: args.db["roomstats"].clone() },
+			db: Data {
+				roomstats: args.db["roomstats"].clone(),
+				global: args.db["global"].clone(),
+			},
 			services: args.services.clone(),
 			queue,
 			inbox: std::sync::Mutex::new(Some(inbox)),
@@ -188,6 +232,8 @@ impl crate::Service for Service {
 		let Some(mut inbox) = self.inbox.lock().expect("locked").take() else {
 			return Ok(());
 		};
+
+		self.bring_up_to_date().await;
 
 		loop {
 			let mut batch = Vec::new();
@@ -218,6 +264,48 @@ impl crate::Service for Service {
 	}
 
 	fn name(&self) -> &str { crate::service::make_name(std::module_path!()) }
+}
+
+/// Brings history up to the current rules if the stored version says it is behind. The walk takes
+/// minutes and its counts come back through the worker's inbox, so it runs on its own task: the
+/// worker has to be in its loop to apply them, and to keep counting what arrives meanwhile.
+#[implement(Service)]
+async fn bring_up_to_date(self: &Arc<Self>) {
+	let stored = self
+		.db
+		.global
+		.get(STATS_VERSION_KEY)
+		.await
+		.deserialized::<u64>()
+		.ok();
+	let complete = self.db.roomstats.get(READY_KEY).await.is_ok();
+
+	match startup_action(stored, complete) {
+		| Startup::Current => {},
+		| Startup::Adopt => {
+			info!(current = STATS_VERSION, "Recording the version of the existing room statistics");
+			self.db
+				.global
+				.raw_put(STATS_VERSION_KEY, STATS_VERSION);
+		},
+		| Startup::Rebuild => {
+			info!(
+				?stored,
+				complete,
+				current = STATS_VERSION,
+				"Counting existing history for the room statistics"
+			);
+			let this = self.clone();
+			self.services.server.runtime().spawn(async move {
+				match this.rebuild().await {
+					| Ok(counted) => info!("Counted {counted} messages."),
+					| Err(e) if !this.services.server.is_running() =>
+						info!("Counting for the room statistics stopped: {e}"),
+					| Err(e) => error!("Rebuilding the room statistics failed: {e}"),
+				}
+			});
+		},
+	}
 }
 
 /// Counts an accepted event, if it is a message.
@@ -532,7 +620,10 @@ pub async fn stats(&self, shortroomid: ShortRoomId) -> Stats {
 	}
 }
 
-/// Counts every room's existing messages, for history that predates the counters.
+/// Counts every room's existing messages, for history that predates the counters or was counted
+/// by older rules. Records the version it counted by when it finishes, so the result of an admin's
+/// command is not redone at the next start; a stop part-way leaves the counters marked incomplete,
+/// and the next start counts again.
 #[implement(Service)]
 pub async fn rebuild(&self) -> Result<usize> {
 	self.db.roomstats.clear().await;
@@ -547,10 +638,15 @@ pub async fn rebuild(&self) -> Result<usize> {
 
 	let mut counted: usize = 0;
 	for room_id in rooms {
+		self.services.server.check_running()?;
 		counted = counted.saturating_add(self.rebuild_room(&room_id).await?);
 	}
 
 	self.db.roomstats.insert(READY_KEY, [1_u8]);
+	self.db
+		.global
+		.raw_put(STATS_VERSION_KEY, STATS_VERSION);
+
 	Ok(counted)
 }
 
@@ -638,7 +734,9 @@ fn count_key(shortroomid: ShortRoomId, class: Class, sender: &str) -> Vec<u8> {
 mod tests {
 	use ruma::events::TimelineEventType;
 
-	use super::{Class, MessageContent, calendar, class_of, has_link};
+	use super::{
+		Class, MessageContent, STATS_VERSION, Startup, calendar, class_of, has_link, startup_action,
+	};
 
 	fn message(msgtype: Option<&str>, body: Option<&str>) -> MessageContent {
 		MessageContent {
@@ -691,6 +789,60 @@ mod tests {
 		assert_eq!(class_of(&TimelineEventType::RoomMessage, None), None);
 	}
 
+	// The class rules changed once already (links were counted apart from text) and the live
+	// server's history kept its old counts until someone typed an admin command.
+	#[test]
+	fn history_counted_by_older_rules_is_counted_again() {
+		assert_eq!(startup_action(Some(STATS_VERSION), true), Startup::Current);
+		// A newer binary's counters, after a rollback: not ours to redo.
+		assert_eq!(startup_action(Some(u64::MAX), true), Startup::Current);
+		assert_eq!(startup_action(Some(0), true), Startup::Rebuild);
+	}
+
+	// The live server's counters predate versions and cover everything: they are kept. Ones that
+	// were never rebuilt hold only what arrived since they were deployed.
+	#[test]
+	fn unversioned_counters_are_adopted_if_complete_and_rebuilt_if_not() {
+		assert_eq!(startup_action(None, true), Startup::Adopt);
+		assert_eq!(startup_action(None, false), Startup::Rebuild);
+	}
+
+	// A rebuild clears the completeness row before it starts and writes it when it ends, so one
+	// that stopped part-way must not pass for done because of the version an earlier one left.
+	#[test]
+	fn a_rebuild_that_stopped_part_way_is_done_again() {
+		assert_eq!(startup_action(Some(STATS_VERSION), false), Startup::Rebuild);
+		assert_eq!(startup_action(Some(u64::MAX), false), Startup::Rebuild);
+	}
+
+	// The rules as STATS_VERSION names them. If this fails, the rules changed: update the table and
+	// raise STATS_VERSION, or existing history keeps being counted by the old ones.
+	#[test]
+	fn the_rules_are_the_ones_the_version_names() {
+		assert_eq!(STATS_VERSION, 1);
+		assert_eq!(class(Some("m.text"), Some("hello")), Some(Class::Text));
+		assert_eq!(class(Some("m.notice"), Some("hello")), Some(Class::Text));
+		assert_eq!(class(Some("m.text"), Some("see https://example.org")), Some(Class::Link));
+		assert_eq!(class(Some("m.image"), None), Some(Class::Image));
+		assert_eq!(class(Some("m.video"), None), Some(Class::Video));
+		assert_eq!(class(Some("m.audio"), None), Some(Class::Audio));
+		assert_eq!(class(Some("m.file"), None), Some(Class::File));
+		let mut voice = message(Some("m.audio"), None);
+		voice.msc3245_voice = Some(serde_json::json!({}));
+		assert_eq!(class_of(&TimelineEventType::RoomMessage, Some(&voice)), Some(Class::Voice));
+		assert_eq!(class_of(&TimelineEventType::Sticker, None), Some(Class::Sticker));
+		assert_eq!(class_of(&TimelineEventType::RoomEncrypted, None), Some(Class::Encrypted));
+		assert_eq!(class_of(&TimelineEventType::RoomTopic, None), None);
+		assert_eq!(class_of(&TimelineEventType::Reaction, None), None);
+	}
+
+	// The manager runs only the workers of the services it lists: without the entry nothing queued
+	// is ever counted, and the rebuild above never starts.
+	#[test]
+	fn the_worker_is_started() {
+		let services = include_str!("../../services.rs");
+		assert!(services.contains("cast!(self.room_stats)"));
+	}
 
 	#[test]
 	fn calendar_month_and_hour_of_week() {
