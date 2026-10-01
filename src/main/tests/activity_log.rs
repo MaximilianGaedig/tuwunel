@@ -140,8 +140,9 @@ async fn activity(services: &Services, base: &str) -> Result {
 	let (status, refused) = get(&carol, log_url(base, &alice_id, "")).await?;
 	assert_eq!((status, refused["errcode"].as_str()), (403, Some("M_FORBIDDEN")), "{refused}");
 
-	// Presence: Carol has done nothing else, so her log is exactly her two changes.
-	for state in ["online", "offline"] {
+	// Presence: Carol has done nothing else, so her log is exactly her two changes. Saying "online"
+	// twice is one of them: a bridge repeats it every few minutes, and a repeat is not a change.
+	for state in ["online", "online", "offline"] {
 		let set = put(
 			&carol,
 			carol.url(&format!("presence/{carol_id}/status")),

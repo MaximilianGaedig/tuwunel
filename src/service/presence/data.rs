@@ -3,7 +3,7 @@ use std::sync::Arc;
 use futures::Stream;
 use ruma::{UInt, UserId, events::presence::PresenceEvent, presence::PresenceState};
 use tuwunel_core::{
-	Result, debug_warn, implement, utils,
+	Err, Result, debug_warn, implement, utils,
 	utils::{ReadyExt, result::NotFound, stream::TryIgnore},
 };
 use tuwunel_database::{Deserialized, Json, Map};
@@ -147,6 +147,11 @@ impl Data {
 		self.userid_presenceid.remove(user_id);
 	}
 
+	/// The rows written after `since`, up to and including `to`, oldest first.
+	///
+	/// Every sync asks this, nearly always for the last few rows, and the table holds one row for
+	/// everyone who was ever seen. The key starts with the count, so the rows wanted are the end
+	/// of the table: seek to them and stop after `to`, rather than read every row to find them.
 	#[inline]
 	pub(super) fn presence_since(
 		&self,
@@ -154,8 +159,9 @@ impl Data {
 		to: Option<u64>,
 	) -> impl Stream<Item = (&UserId, u64, &[u8])> + Send + '_ {
 		self.presenceid_presence
-			.raw_stream()
+			.raw_stream_from(&presenceid_first_after(since))
 			.ignore_err()
+			.ready_take_while(move |(key, _): &(&[u8], &[u8])| !presenceid_is_past(key, to))
 			.ready_filter_map(move |(key, presence)| {
 				let (count, user_id) = presenceid_parse(key).ok()?;
 				(count > since && to.is_none_or(|to| count <= to))
@@ -220,9 +226,34 @@ fn presenceid_key(count: u64, user_id: &UserId) -> Vec<u8> {
 	key
 }
 
+/// Where to start reading for the rows written after `since`: the smallest key a row with the
+/// next count can have. Counts are stored big-endian, so their order as bytes is their order as
+/// numbers, and no row with a count up to `since` sorts at or after this.
+///
+/// At the largest count there is no next one; the seek then lands on rows with that count, which
+/// are not after it, and the caller's own comparison leaves them out.
+#[inline]
+fn presenceid_first_after(since: u64) -> [u8; size_of::<u64>()] {
+	since.saturating_add(1).to_be_bytes()
+}
+
+/// Whether a key's count is beyond `to`, which ends a read in key order: every later key is
+/// beyond it too. A key too short to hold a count ends nothing; it is skipped when parsed.
+#[inline]
+fn presenceid_is_past(key: &[u8], to: Option<u64>) -> bool {
+	let Some(to) = to else {
+		return false;
+	};
+
+	key.first_chunk::<{ size_of::<u64>() }>()
+		.is_some_and(|count| u64::from_be_bytes(*count) > to)
+}
+
 #[inline]
 fn presenceid_parse(key: &[u8]) -> Result<(u64, &UserId)> {
-	let (count, user_id) = key.split_at(8);
+	let Some((count, user_id)) = key.split_at_checked(size_of::<u64>()) else {
+		return Err!(Database("Presence key is too short to hold a count"));
+	};
 	let user_id = user_id_from_bytes(user_id)?;
 	let count = utils::u64_from_u8(count);
 
@@ -235,4 +266,147 @@ fn user_id_from_bytes(bytes: &[u8]) -> Result<&UserId> {
 	let user_id: &UserId = str.try_into()?;
 
 	Ok(user_id)
+}
+
+#[cfg(test)]
+mod tests {
+	use std::collections::BTreeMap;
+
+	use futures::StreamExt;
+	use ruma::{OwnedUserId, UserId, presence::PresenceState, user_id};
+	use tuwunel_core::{Result, config::Figment, utils::stream::TryIgnore};
+
+	use super::{
+		Data, presenceid_first_after, presenceid_is_past, presenceid_key, presenceid_parse,
+	};
+	use crate::test_utils::fixture;
+
+	/// Counts on both sides of every place where a byte carries into the next, which is where an
+	/// order of bytes and an order of numbers come apart if the key is built the wrong way round.
+	const COUNTS: [u64; 12] = [
+		0,
+		1,
+		2,
+		255,
+		256,
+		257,
+		65_535,
+		65_536,
+		4_294_967_295,
+		4_294_967_296,
+		u64::MAX - 1,
+		u64::MAX,
+	];
+
+	// The table is read in the order of its keys, as bytes. A map ordered the same way stands
+	// in for it here, and the answer is checked against reading every row, which is what this
+	// used to do. A seek key that starts too late, or a stop that comes too early, loses rows.
+	#[test]
+	fn seeking_finds_exactly_the_rows_that_reading_everything_did() {
+		let users = [user_id!("@a:example.com"), user_id!("@zebra:example.com")];
+		let table: BTreeMap<Vec<u8>, u64> = COUNTS
+			.iter()
+			.zip(users.iter().cycle())
+			.map(|(count, user)| (presenceid_key(*count, user), *count))
+			.collect();
+
+		let bounds = COUNTS.iter().copied().map(Some).chain([None]);
+		for (since, to) in COUNTS
+			.iter()
+			.flat_map(|since| bounds.clone().map(move |to| (*since, to)))
+		{
+			let wanted = |count: &u64| *count > since && to.is_none_or(|to| *count <= to);
+			let by_reading_everything: Vec<u64> =
+				table.values().copied().filter(wanted).collect();
+			let by_seeking: Vec<u64> = table
+				.range(presenceid_first_after(since).to_vec()..)
+				.take_while(|(key, _)| !presenceid_is_past(key, to))
+				.map(|(_, count)| *count)
+				.filter(wanted)
+				.collect();
+
+			assert_eq!(by_seeking, by_reading_everything, "since {since}, to {to:?}");
+		}
+	}
+
+	// A key that cannot be a presence row is passed over: no reason to stop reading, or to panic.
+	#[test]
+	fn a_key_too_short_for_a_count_is_passed_over() {
+		assert!(!presenceid_is_past(b"short", Some(0)));
+		assert!(!presenceid_is_past(b"", None));
+		assert!(presenceid_parse(b"short").is_err());
+	}
+
+	async fn read(db: &Data, since: u64, to: Option<u64>) -> Vec<(OwnedUserId, u64)> {
+		db.presence_since(since, to)
+			.map(|(user_id, count, _)| (user_id.to_owned(), count))
+			.collect()
+			.await
+	}
+
+	/// Every row of the table, read from its start: what `presence_since` used to filter.
+	async fn everything(db: &Data) -> Vec<(OwnedUserId, u64)> {
+		db.presenceid_presence
+			.raw_stream()
+			.ignore_err()
+			.map(|(key, _)| {
+				let (count, user_id) = presenceid_parse(key).expect("a presence key");
+				(user_id.to_owned(), count)
+			})
+			.collect()
+			.await
+	}
+
+	// The same through the real table: rows written the way presence writes them, and each answer
+	// checked against a read of the whole table. This is what would notice the database ordering
+	// keys differently from the map above, or the seek being given something it reads otherwise.
+	#[tokio::test]
+	async fn presence_since_is_the_rows_after_since_up_to_to() -> Result {
+		let Some(fixture) = fixture(Figment::new()).await? else {
+			return Ok(());
+		};
+
+		let db = &fixture.services.presence.db;
+		let users: [&UserId; 5] = [
+			user_id!("@zoe:localhost"),
+			user_id!("@adam:localhost"),
+			user_id!("@mia:localhost"),
+			user_id!("@bo:localhost"),
+			user_id!("@yusuf:localhost"),
+		];
+		for user in users {
+			db.set_presence(user, &PresenceState::Online, Some(true), None, None)
+				.await?;
+		}
+
+		let all = everything(db).await;
+		let written: Vec<&UserId> = all.iter().map(|(user, _)| &**user).collect();
+		assert_eq!(written, users, "one row each, in the order they were written");
+
+		for (position, (_, count)) in all.iter().enumerate() {
+			let after = position.saturating_add(1);
+			assert_eq!(read(db, *count, None).await, all[after..], "after {count}");
+			assert_eq!(read(db, 0, Some(*count)).await, all[..after], "up to {count}");
+			assert_eq!(
+				read(db, all[0].1, Some(*count)).await,
+				all[1..after.max(1)],
+				"after the first, up to {count}"
+			);
+			assert!(read(db, *count, Some(*count)).await.is_empty(), "an empty range at {count}");
+		}
+
+		assert_eq!(read(db, 0, None).await, all);
+		assert!(read(db, u64::MAX, None).await.is_empty());
+
+		// A change moves a row to the end, which is what a sync waiting at the old end is for.
+		let newest = all.last().map_or(0, |(_, count)| *count);
+		db.set_presence(users[0], &PresenceState::Unavailable, Some(false), None, None)
+			.await?;
+		let moved = read(db, newest, None).await;
+		assert_eq!(moved.len(), 1, "{moved:?}");
+		assert_eq!(&*moved[0].0, users[0]);
+		assert_eq!(everything(db).await.len(), users.len(), "the old row is gone");
+
+		Ok(())
+	}
 }

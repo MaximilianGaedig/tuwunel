@@ -27,7 +27,13 @@
 //! The index lives beside the database rather than inside it, which also means rolling the server
 //! back is still possible: nothing here adds a column family the old binary would not know.
 
-use std::{path::Path, sync::Mutex};
+use std::{
+	path::Path,
+	sync::{
+		Mutex,
+		atomic::{AtomicBool, Ordering},
+	},
+};
 
 use tantivy::{
 	Index, IndexReader, IndexWriter, Order, ReloadPolicy, TantivyDocument, Term,
@@ -77,6 +83,12 @@ pub(super) struct Engine {
 	reader: IndexReader,
 	writer: Mutex<IndexWriter>,
 	fields: Fields,
+	/// Whether anything was added or removed since the last commit. Tantivy does not keep track
+	/// of this itself: a commit with nothing in it still rewrites and syncs `meta.json`, so
+	/// committing on a timer cost a file write every tick of a server nobody was writing to. It
+	/// is only changed with the writer locked, so a commit cannot clear it for a message it
+	/// missed.
+	dirty: AtomicBool,
 }
 
 /// What a search found: how many matched in total, and the page asked for, newest first.
@@ -130,15 +142,22 @@ impl Engine {
 			.writer_with_num_threads(WRITER_THREADS, WRITER_HEAP)
 			.map_err(|e| err!(Database("Could not write to the search index: {e}")))?;
 
-		Ok(Self { reader, writer: Mutex::new(writer), fields })
+		Ok(Self {
+			reader,
+			writer: Mutex::new(writer),
+			fields,
+			dirty: AtomicBool::new(false),
+		})
 	}
 
 	/// Adds one message. Cheap: it buffers, and {@link commit} makes it searchable.
 	pub(super) fn add(&self, room: ShortRoomId, pdu: &[u8], order: i64, body: &str) -> Result {
 		let fields = self.fields;
-		self.writer
+		let writer = self
+			.writer
 			.lock()
-			.map_err(|e| err!(Database("The search index writer is poisoned: {e}")))?
+			.map_err(|e| err!(Database("The search index writer is poisoned: {e}")))?;
+		writer
 			.add_document(doc!(
 				fields.room => u64::from(room),
 				fields.body => body,
@@ -146,6 +165,7 @@ impl Engine {
 				fields.order => order,
 			))
 			.map_err(|e| err!(Database("Could not index a message: {e}")))?;
+		self.dirty.store(true, Ordering::Release);
 
 		Ok(())
 	}
@@ -153,10 +173,12 @@ impl Engine {
 	/// Forgets one message: redacted, purged, or its text replaced.
 	pub(super) fn remove(&self, pdu: &[u8]) -> Result {
 		let term = Term::from_field_bytes(self.fields.pdu, pdu);
-		self.writer
+		let writer = self
+			.writer
 			.lock()
-			.map_err(|e| err!(Database("The search index writer is poisoned: {e}")))?
-			.delete_term(term);
+			.map_err(|e| err!(Database("The search index writer is poisoned: {e}")))?;
+		writer.delete_term(term);
+		self.dirty.store(true, Ordering::Release);
 
 		Ok(())
 	}
@@ -164,15 +186,31 @@ impl Engine {
 	/// Whether nothing has been committed to the index yet.
 	pub(super) fn is_empty(&self) -> bool { self.reader.searcher().num_docs() == 0 }
 
-	/// Makes everything added so far searchable.
-	pub(super) fn commit(&self) -> Result {
-		self.writer
-			.lock()
-			.map_err(|e| err!(Database("The search index writer is poisoned: {e}")))?
-			.commit()
-			.map_err(|e| err!(Database("Could not commit the search index: {e}")))?;
+	/// Whether anything is waiting for a commit. Costs nothing, so the timer can ask every tick.
+	pub(super) fn is_dirty(&self) -> bool { self.dirty.load(Ordering::Acquire) }
 
-		Ok(())
+	/// Makes everything added or removed so far searchable, and says whether there was anything:
+	/// with nothing waiting it touches no file.
+	///
+	/// This writes and syncs files, so it blocks: from async code it belongs on a blocking
+	/// thread.
+	pub(super) fn commit(&self) -> Result<bool> {
+		let mut writer = self
+			.writer
+			.lock()
+			.map_err(|e| err!(Database("The search index writer is poisoned: {e}")))?;
+
+		if !self.dirty.swap(false, Ordering::AcqRel) {
+			return Ok(false);
+		}
+
+		if let Err(e) = writer.commit() {
+			// Still waiting, so the next tick tries again rather than forgetting it.
+			self.dirty.store(true, Ordering::Release);
+			return Err(err!(Database("Could not commit the search index: {e}")));
+		}
+
+		Ok(true)
 	}
 
 	/// Forgets every message of one room, for a room being deleted.
@@ -181,11 +219,14 @@ impl Engine {
 			Term::from_field_u64(self.fields.room, u64::from(room)),
 			IndexRecordOption::Basic,
 		);
-		self.writer
+		let writer = self
+			.writer
 			.lock()
-			.map_err(|e| err!(Database("The search index writer is poisoned: {e}")))?
+			.map_err(|e| err!(Database("The search index writer is poisoned: {e}")))?;
+		writer
 			.delete_query(Box::new(query))
 			.map_err(|e| err!(Database("Could not forget a room's messages: {e}")))?;
+		self.dirty.store(true, Ordering::Release);
 
 		Ok(())
 	}
@@ -202,6 +243,8 @@ impl Engine {
 		writer
 			.commit()
 			.map_err(|e| err!(Database("Could not commit the search index: {e}")))?;
+		// That commit took everything that was waiting with it.
+		self.dirty.store(false, Ordering::Release);
 
 		Ok(())
 	}
