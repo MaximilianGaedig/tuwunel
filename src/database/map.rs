@@ -50,7 +50,7 @@ use self::watch::Watch;
 ///
 /// `Get` accepts raw keys, while `Qry` serializes structured keys before
 /// lookup. Both yield pinned value handles through an asynchronous stream.
-pub use self::{get_batch::Get, qry_batch::Qry};
+pub use self::{get_batch::Get, qry_batch::Qry, watch::Observer};
 use crate::{Engine, util::map_err};
 
 /// Provides typed and raw access to one RocksDB column family.

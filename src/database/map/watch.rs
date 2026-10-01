@@ -1,7 +1,7 @@
 use std::{
 	collections::{BTreeMap, btree_map::Entry},
 	ops::RangeToInclusive,
-	sync::Mutex,
+	sync::{Mutex, RwLock},
 };
 
 use futures::pin_mut;
@@ -22,6 +22,12 @@ type Watchers = Mutex<BTreeMap<KeyBuf, Sender<()>>>;
 /// more than one closed subscription. Larger reap batches spill to the heap.
 type KeyVec = SmallVec<[KeyBuf; 1]>;
 
+/// Told the raw key of every mutation of a map.
+///
+/// It runs on the writer's thread before the subscriptions are woken, so
+/// whoever a subscription wakes already finds what the observer recorded.
+pub type Observer = Box<dyn Fn(&[u8]) + Send + Sync>;
+
 /// Owns the prefix subscriptions registered for a map.
 ///
 /// A mutex protects subscription insertion, notification, and stale-entry
@@ -29,6 +35,30 @@ type KeyVec = SmallVec<[KeyBuf; 1]>;
 #[derive(Default)]
 pub(super) struct Watch {
 	watchers: Watchers,
+	observer: RwLock<Option<Observer>>,
+}
+
+/// Installs the observer of this map's mutations, replacing any earlier one.
+///
+/// A subscription only says that something under a prefix changed, and only to
+/// those waiting at that moment. An observer sees which key changed, whether
+/// or not anyone waits, which is what lets a reader keep a record of the rooms
+/// written to instead of asking the database about each of them.
+///
+/// Replacing rather than refusing matters when services are rebuilt over a
+/// database that stayed open: the observer of the services that went away must
+/// not keep the place of the one that needs it.
+///
+/// # Panics
+///
+/// Panics if the observer lock is poisoned.
+#[implement(super::Map)]
+pub fn observe(&self, observer: Observer) {
+	self.watch
+		.observer
+		.write()
+		.expect("locked")
+		.replace(observer);
 }
 
 /// Waits for the next map mutation under a serialized prefix.
@@ -157,6 +187,16 @@ pub(crate) fn notify<K>(&self, key: &K)
 where
 	K: AsRef<[u8]> + Ord + ?Sized,
 {
+	if let Some(observer) = self
+		.watch
+		.observer
+		.read()
+		.expect("locked")
+		.as_ref()
+	{
+		observer(key.as_ref());
+	}
+
 	let range = RangeToInclusive::<KeyBuf> { end: key.as_ref().into() };
 
 	let mut watchers = self.watch.watchers.lock().expect("locked");
