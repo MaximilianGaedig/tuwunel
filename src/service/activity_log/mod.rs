@@ -74,6 +74,9 @@ pub enum Kind {
 	Typing = 5,
 	Read = 6,
 	Reaction = 7,
+	/// A network said they were last active then, without them doing anything
+	/// the server saw: what a bridge is told when someone has come and gone.
+	Seen = 8,
 }
 
 impl Kind {
@@ -87,6 +90,7 @@ impl Kind {
 			| 5 => Some(Self::Typing),
 			| 6 => Some(Self::Read),
 			| 7 => Some(Self::Reaction),
+			| 8 => Some(Self::Seen),
 			| _ => None,
 		}
 	}
@@ -101,6 +105,7 @@ impl Kind {
 			| Self::Typing => "typing",
 			| Self::Read => "read",
 			| Self::Reaction => "reaction",
+			| Self::Seen => "seen",
 		}
 	}
 
@@ -213,6 +218,19 @@ pub fn log_pdu<E: Event>(&self, shortroomid: ShortRoomId, pdu: &E) {
 	if let Some(kind) = kind_of_event(pdu.kind(), pdu.state_key().is_some()) {
 		self.put(pdu.sender(), u64::from(pdu.origin_server_ts().0), kind, shortroomid);
 	}
+}
+
+/// Records when a network says someone was last active. The time is theirs,
+/// not now: a bridge learns it afterwards. One in the future is the network's
+/// clock or a mistake, and is left out.
+#[implement(Service)]
+pub fn log_seen(&self, user_id: &UserId, ts: u64) -> bool {
+	if !seen_is_past(ts, millis_since_unix_epoch()) {
+		return false;
+	}
+	self.put(user_id, ts, Kind::Seen, 0);
+
+	true
 }
 
 /// Records someone starting to type, once per burst.
@@ -354,6 +372,9 @@ fn kind_of_event(event_type: &TimelineEventType, is_state: bool) -> Option<Kind>
 	}
 }
 
+/// Whether a last-active time can be one: not after now, give or take a clock.
+const fn seen_is_past(ts: u64, now: u64) -> bool { ts > 0 && ts <= now.saturating_add(60_000) }
+
 /// Whether typing at `now` starts a new burst, given when the last was written.
 const fn typing_is_new(last: Option<u64>, now: u64) -> bool {
 	match last {
@@ -431,7 +452,7 @@ impl WeekFold {
 					self.online_since = Some(entry.ts);
 				},
 			| Kind::Unavailable | Kind::Offline => self.close(entry.ts),
-			| Kind::Sent | Kind::Typing | Kind::Read | Kind::Reaction => {
+			| Kind::Sent | Kind::Typing | Kind::Read | Kind::Reaction | Kind::Seen => {
 				self.seen_at(entry.ts);
 			},
 		}
@@ -498,7 +519,10 @@ fn weekday_of(day: u64) -> usize { usize::try_from((day.saturating_add(3)) % 7).
 mod tests {
 	use ruma::events::TimelineEventType;
 
-	use super::{DAY_MS, Entry, HOUR_MS, Kind, WeekFold, kind_of_event, typing_is_new, weekday_of};
+	use super::{
+		DAY_MS, Entry, HOUR_MS, Kind, WeekFold, kind_of_event, seen_is_past, typing_is_new,
+		weekday_of,
+	};
 
 	// Monday 2024-01-01 00:00 UTC.
 	const MONDAY: u64 = 1_704_067_200_000;
@@ -592,6 +616,19 @@ mod tests {
 		assert!(typing_is_new(Some(1_000), 40_000));
 	}
 
+	// Messenger says when someone was last active, to the second, and the bridge could only pass
+	// on "offline": the hour they were there in went unrecorded.
+	#[test]
+	fn a_last_active_time_counts_the_hour_it_names() {
+		let at = MONDAY + 14 * HOUR_MS + 5;
+		let week = fold(&[(at, Kind::Seen)], 0, at + HOUR_MS);
+
+		assert_eq!(week.seen[0][14], 1);
+		assert!(seen_is_past(at, at + HOUR_MS));
+		assert!(!seen_is_past(at + DAY_MS, at), "a time that hasn't come");
+		assert!(!seen_is_past(0, at), "no time at all");
+	}
+
 	#[test]
 	fn every_kind_reads_back_as_itself() {
 		for kind in [
@@ -602,6 +639,7 @@ mod tests {
 			Kind::Typing,
 			Kind::Read,
 			Kind::Reaction,
+			Kind::Seen,
 		] {
 			assert_eq!(Kind::from_byte(kind as u8), Some(kind));
 		}
