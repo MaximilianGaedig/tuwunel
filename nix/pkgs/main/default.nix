@@ -97,6 +97,16 @@ let
         preInstall = "";
       });
 
+  crossCompilationEnv = import ./cross-compilation-env.nix {
+    # Keep sorted
+    inherit
+      lib
+      pkgsBuildHost
+      rust
+      stdenv
+      ;
+  };
+
   buildDepsOnlyEnv = {
     # https://crane.dev/faq/rebuilds-bindgen.html
     NIX_OUTPATH_USED_AS_RANDOM_SEED = "aaaaaaaaaa";
@@ -105,30 +115,28 @@ let
     ROCKSDB_INCLUDE_DIR = "${rocksdb'}/include";
     ROCKSDB_LIB_DIR = "${rocksdb'}/lib";
   }
-  // (import ./cross-compilation-env.nix {
-    # Keep sorted
-    inherit
-      lib
-      pkgsBuildHost
-      rust
-      stdenv
-      ;
-  });
-
-  buildPackageEnv = {
-    TUWUNEL_VERSION_EXTRA = inputs.self.shortRev or inputs.self.dirtyShortRev or "";
-    TUWUNEL_DATABASE_PATH = "/var/tmp/tuwunel.db";
-  }
-  // buildDepsOnlyEnv
+  // crossCompilationEnv
   // {
-    # Only needed in static stdenv because these are transitive dependencies of rocksdb
+    # The dependencies have to be compiled with exactly the flags the package
+    # is: cargo keys every artifact on RUSTFLAGS, so flags added only for the
+    # package made it throw the prebuilt dependencies away and compile each of
+    # them a second time.
+    #
+    # liburing is only needed in static stdenv because it is a transitive
+    # dependency of rocksdb
     CARGO_BUILD_RUSTFLAGS =
-      buildDepsOnlyEnv.CARGO_BUILD_RUSTFLAGS
+      crossCompilationEnv.CARGO_BUILD_RUSTFLAGS
       + lib.optionalString (
         enableLiburing && stdenv.hostPlatform.isStatic
       ) " -L${lib.getLib liburing}/lib -luring"
       + lib.optionalString x86_64_haswell_target_optimised " -Ctarget-cpu=haswell";
   };
+
+  buildPackageEnv = {
+    TUWUNEL_VERSION_EXTRA = inputs.self.shortRev or inputs.self.dirtyShortRev or "";
+    TUWUNEL_DATABASE_PATH = "/var/tmp/tuwunel.db";
+  }
+  // buildDepsOnlyEnv;
 
   commonAttrs = {
     inherit
