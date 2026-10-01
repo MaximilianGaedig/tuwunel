@@ -1,3 +1,5 @@
+mod activity;
+mod scope;
 mod watch;
 
 #[cfg(test)]
@@ -24,10 +26,19 @@ use tuwunel_core::{
 };
 use tuwunel_database::{Cbor, Deserialized, Map};
 
+pub use self::{
+	activity::{Activity, Stamp},
+	scope::{RoomScope, rejects_everything},
+};
+
 pub struct Service {
 	services: Arc<crate::services::OnceServices>,
 	connections: Connections,
 	db: Data,
+
+	/// Which rooms were written to since the process started, so an
+	/// incremental sync can leave the others alone.
+	pub activity: Arc<Activity>,
 }
 
 struct Data {
@@ -114,7 +125,11 @@ type RoomUpdate<'a> = (&'a RoomId, Option<RoomConfig>);
 
 impl crate::Service for Service {
 	fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
+		let activity = Arc::new(Activity::default());
+		activity::observe(args.db, args.services, &activity);
+
 		Ok(Arc::new(Self {
+			activity,
 			db: Data {
 				userdeviceconnid_conn: args.db["userdeviceconnid_conn"].clone(),
 				todeviceid_events: args.db["todeviceid_events"].clone(),
@@ -140,6 +155,59 @@ impl crate::Service for Service {
 	}
 
 	fn name(&self) -> &str { crate::service::make_name(std::module_path!()) }
+}
+
+/// Whether the activity record can say, for a sync resuming from `since`,
+/// which rooms have something to report.
+///
+/// The first question also starts the record if no write has started it yet.
+#[implement(Service)]
+#[must_use]
+pub fn activity_covers(&self, since: u64) -> bool {
+	self.activity
+		.begin(self.services.globals.pending_count().end);
+
+	self.activity.covers(since)
+}
+
+/// What the activity record holds about a room, or nothing when the room
+/// cannot be looked up, in which case it has to be loaded.
+#[implement(Service)]
+pub async fn room_activity(&self, room_id: &RoomId) -> Option<Stamp> {
+	let (short_id, generation) = self.activity.short_id(room_id);
+	let short_id = match short_id {
+		| Some(short_id) => short_id,
+		| None => {
+			let short_id = self
+				.services
+				.short
+				.get_shortroomid(room_id)
+				.await
+				.ok()?;
+
+			self.activity
+				.set_short_id(room_id, short_id, generation);
+
+			short_id
+		},
+	};
+
+	Some(self.activity.stamp(room_id, short_id))
+}
+
+/// A future resolving at the next write that can change a device list in any
+/// room.
+///
+/// The subscription is made here, not when the future is first polled, so
+/// nothing written in between is missed.
+#[implement(Service)]
+pub fn watch_device_lists(&self) -> impl Future<Output = ()> + Send + use<> {
+	let mut device_lists = self.activity.device_lists();
+
+	async move {
+		// The sender only goes away with the service; waking is the safe answer.
+		device_lists.changed().await.ok();
+	}
 }
 
 #[implement(Service)]
