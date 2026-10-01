@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use futures::TryFutureExt;
 use ruma::{
-	DeviceId, OwnedUserId, UInt, UserId, events::presence::PresenceEvent, presence::PresenceState,
+	DeviceId, OwnedUserId, UInt, UserId,
+	events::presence::{PresenceEvent, PresenceEventContent},
+	presence::PresenceState,
 };
 use tokio::time::sleep;
 use tuwunel_core::{
@@ -26,6 +28,17 @@ use super::{
 };
 
 impl Service {
+	/// How old the stored "last active" may get while explicit updates keep saying the same
+	/// thing, before one of them is written after all.
+	///
+	/// It has to be longer than the few minutes between a bridge's repeats, or every repeat would
+	/// still be a row. What bounds it from above is other servers: one that hears nothing about a
+	/// user for half an hour takes them for gone. Synapse draws the same two lines, never telling
+	/// anyone about a newer "last active" while the user is still active, and repeating itself to
+	/// other servers every twenty-five minutes for the sake of their thirty-minute timeout
+	/// (`FEDERATION_PING_INTERVAL` and `FEDERATION_TIMEOUT` in its presence handler).
+	const REASSERT_REFRESH_MS: u64 = 25 * 60 * 1000;
+
 	fn device_key(device_id: Option<&DeviceId>, is_remote: bool) -> aggregate::DeviceKey {
 		if is_remote {
 			return aggregate::DeviceKey::Remote;
@@ -85,6 +98,24 @@ impl Service {
 		let last_last_active_ago: u64 = event.content.last_active_ago?.into();
 
 		(last_last_active_ago < refresh_ms).then_some((count, last_last_active_ago))
+	}
+
+	/// Whether an update would leave everything a reader can see of someone as it is: the state,
+	/// whether they are active right now, and the status message. When they were last active is
+	/// left to the refresh window, see [`Self::refresh_skip_decision`].
+	///
+	/// An empty status message is the same as none: it is stored as none.
+	fn changes_nothing_visible(
+		last: &PresenceEventContent,
+		state: &PresenceState,
+		currently_active: bool,
+		status_msg: Option<&str>,
+	) -> bool {
+		fn said(msg: Option<&str>) -> Option<&str> { msg.filter(|msg| !msg.is_empty()) }
+
+		last.presence == *state
+			&& last.currently_active.unwrap_or(false) == currently_active
+			&& said(last.status_msg.as_deref()) == said(status_msg)
 	}
 
 	fn timer_is_stale(expected_count: u64, current_count: u64) -> bool {
@@ -164,13 +195,33 @@ impl Service {
 			.as_ref()
 			.map(|event| event.content.presence.clone());
 
-		let state_changed = match &last_event {
-			| Some(event) => event.content.presence != aggregated.state,
-			| None => true,
+		// 4) Unchanged preserves the last non-empty status; explicit None clears it.
+		let fallback_status = || {
+			last_event
+				.as_ref()
+				.and_then(|event| event.content.status_msg.clone())
+				.filter(|msg| !msg.is_empty())
 		};
 
-		// 4) For rapid pings with no state change, skip writes and reschedule.
-		if !state_changed
+		let status_msg = aggregated
+			.status_msg
+			.clone()
+			.or_else(|| preserve_status.then(fallback_status).flatten());
+
+		// 5) An update that shows nothing new, soon after the last one, writes nothing: a new
+		// row is a new stream position, and that wakes the sync of everyone who can see this
+		// user. The device snapshot above has already taken the update, and the timer is set
+		// again here, so going idle is still measured from this moment rather than from the row.
+		let nothing_new = last_event.as_ref().is_some_and(|event| {
+			Self::changes_nothing_visible(
+				&event.content,
+				&aggregated.state,
+				aggregated.currently_active,
+				status_msg.as_deref(),
+			)
+		});
+
+		if nothing_new
 			&& let Some((count, last_last_active_ago)) =
 				Self::refresh_skip_decision(refresh_window_ms, last_event.as_ref(), last_count)
 		{
@@ -193,7 +244,7 @@ impl Service {
 			return Ok(());
 		}
 
-		// 5) If we just transitioned away from online, flush suppressed pushes.
+		// 6) If we just transitioned away from online, flush suppressed pushes.
 		if matches!(last_state, Some(PresenceState::Online))
 			&& aggregated.state != PresenceState::Online
 		{
@@ -211,17 +262,6 @@ impl Service {
 					"presence->inactive (aggregate)",
 				);
 		}
-
-		// 6) Unchanged preserves the last non-empty status; explicit None clears it.
-		let fallback_status = || {
-			last_event
-				.and_then(|event| event.content.status_msg)
-				.filter(|msg| !msg.is_empty())
-		};
-
-		let status_msg = aggregated
-			.status_msg
-			.or_else(|| preserve_status.then(fallback_status).flatten());
 
 		let last_active_ago =
 			Some(UInt::new_saturating(now.saturating_sub(aggregated.last_active_ts)));
@@ -278,6 +318,11 @@ impl Service {
 	}
 
 	/// Applies an explicit presence update for a local device.
+	///
+	/// A bridge sets "online" for each of its users again every few minutes for as long as the
+	/// network says so, because presence here goes idle by itself if nobody repeats it. Such a
+	/// repeat says nothing new, so it writes nothing, see [`Self::REASSERT_REFRESH_MS`]; it keeps
+	/// the user from going idle all the same.
 	pub async fn set_presence_for_device(
 		&self,
 		user_id: &UserId,
@@ -293,7 +338,7 @@ impl Service {
 			Some(currently_active),
 			None,
 			StatusMsg::Set(status_msg),
-			None,
+			Some(Self::REASSERT_REFRESH_MS),
 		)
 		.await
 	}
@@ -448,9 +493,18 @@ pub(super) async fn presence_timer(
 
 #[cfg(test)]
 mod tests {
+	use futures::StreamExt;
 	use ruma::{uint, user_id};
+	use tuwunel_core::{
+		config::Figment,
+		utils::{ReadyExt, millis_since_unix_epoch},
+	};
 
 	use super::*;
+	use crate::{
+		activity_log::{Entry, Kind},
+		test_utils::fixture,
+	};
 
 	#[test]
 	fn refresh_window_skip_decision() {
@@ -497,5 +551,231 @@ mod tests {
 	fn timer_stale_detection() {
 		assert!(Service::timer_is_stale(2, 3));
 		assert!(!Service::timer_is_stale(2, 2));
+	}
+
+	fn shown(
+		presence: PresenceState,
+		currently_active: Option<bool>,
+		status_msg: Option<&str>,
+		last_active_ago: u64,
+	) -> PresenceEvent {
+		PresenceEvent {
+			sender: user_id!("@ghost:example.com").to_owned(),
+			content: PresenceEventContent {
+				presence,
+				status_msg: status_msg.map(ToOwned::to_owned),
+				currently_active,
+				last_active_ago: Some(UInt::new_saturating(last_active_ago)),
+				avatar_url: None,
+				displayname: None,
+			},
+		}
+	}
+
+	// A repeat is the same state, the same "active now" and the same status message. Anything
+	// else is news and must be written: a missed case here is a change nobody is told about.
+	#[test]
+	fn a_repeat_shows_nothing_new_and_a_change_does() {
+		let online = shown(PresenceState::Online, Some(true), None, 0).content;
+		let same = |state: &PresenceState, active, msg| {
+			Service::changes_nothing_visible(&online, state, active, msg)
+		};
+
+		assert!(same(&PresenceState::Online, true, None));
+		// Stored as none, so an empty message is not a new one.
+		assert!(same(&PresenceState::Online, true, Some("")));
+
+		assert!(!same(&PresenceState::Unavailable, true, None));
+		assert!(!same(&PresenceState::Offline, true, None));
+		assert!(!same(&PresenceState::Online, false, None));
+		assert!(!same(&PresenceState::Online, true, Some("in a call")));
+
+		let busy = shown(PresenceState::Online, Some(true), Some("in a call"), 0).content;
+		assert!(Service::changes_nothing_visible(
+			&busy,
+			&PresenceState::Online,
+			true,
+			Some("in a call")
+		));
+		// Clearing a message and changing one are both news.
+		assert!(!Service::changes_nothing_visible(&busy, &PresenceState::Online, true, None));
+		assert!(!Service::changes_nothing_visible(
+			&busy,
+			&PresenceState::Online,
+			true,
+			Some("in a meeting")
+		));
+
+		// A row that never said whether they were active reads as not active.
+		let unsaid = shown(PresenceState::Unavailable, None, None, 0).content;
+		assert!(Service::changes_nothing_visible(
+			&unsaid,
+			&PresenceState::Unavailable,
+			false,
+			None
+		));
+		assert!(!Service::changes_nothing_visible(
+			&unsaid,
+			&PresenceState::Unavailable,
+			true,
+			None
+		));
+	}
+
+	// The window is what keeps the stored "last active" from growing old without bound: a repeat
+	// is skipped while the row is younger than the window and written from the window on. One
+	// millisecond either side of it, and no window at all (federation), which never skips.
+	#[test]
+	fn a_repeat_is_skipped_only_inside_the_refresh_window() {
+		let window = Service::REASSERT_REFRESH_MS;
+		let aged = |ago| shown(PresenceState::Online, Some(true), None, ago);
+		let decide =
+			|ago, window| Service::refresh_skip_decision(window, Some(&aged(ago)), Some(7));
+
+		assert_eq!(decide(0, Some(window)), Some((7, 0)));
+		let inside = window.saturating_sub(1);
+		assert_eq!(decide(inside, Some(window)), Some((7, inside)));
+		assert_eq!(decide(window, Some(window)), None);
+		assert_eq!(decide(window.saturating_add(1), Some(window)), None);
+		assert_eq!(decide(0, None), None);
+
+		// Longer than the four minutes between a bridge's repeats, or every repeat is a row;
+		// under the half hour after which another server takes a user it hears nothing of for
+		// gone, with one more repeat's worth to spare, since a row is only written when a repeat
+		// arrives.
+		let bridge_repeats_every = 4 * 60 * 1000;
+		let other_servers_give_up_after = 30 * 60 * 1000;
+		assert!(window > bridge_repeats_every);
+		assert!(window.saturating_add(bridge_repeats_every) < other_servers_give_up_after);
+	}
+
+	async fn rows_of(service: &Service, user_id: &UserId) -> Vec<u64> {
+		service
+			.presence_since(0, None)
+			.ready_filter_map(|(user, count, _)| (user == user_id).then_some(count))
+			.collect()
+			.await
+	}
+
+	/// The newest timer asked for since the last look, the way the worker would be left with it:
+	/// a later one for the same user replaces an earlier one.
+	fn timer_set(service: &Service) -> Option<(OwnedUserId, Duration, u64)> {
+		let mut newest = None;
+		while let Ok(timer) = service.timer_channel.1.try_recv() {
+			newest = Some(timer);
+		}
+
+		newest
+	}
+
+	async fn logged(services: &crate::Services, user_id: &UserId) -> Vec<Entry> {
+		services
+			.activity_log
+			.entries(user_id, 0, u64::MAX)
+			.collect()
+			.await
+	}
+
+	fn kinds(entries: &[Entry]) -> Vec<Kind> { entries.iter().map(|entry| entry.kind).collect() }
+
+	// What a bridge does to one of its users, through the real tables: "online", the same again,
+	// and then nothing. The repeat must not be a new row (a new row wakes every sync that can see
+	// the user), must not be a row in the activity log either, and must still push going idle
+	// back to a full timeout after it; the changes that follow are rows in both, as before.
+	//
+	// The worker that sleeps on the timers is not running here, so the test reads which timer was
+	// asked for and fires it by hand once that long has passed.
+	#[tokio::test]
+	async fn a_repeated_online_keeps_its_row_and_the_user_still_goes_offline() -> Result {
+		const IDLE: Duration = Duration::from_secs(1);
+		// Long enough after going idle that a slow machine does not get there early.
+		const OFFLINE: Duration = Duration::from_secs(5);
+		const MARGIN: Duration = Duration::from_millis(100);
+
+		let config = Figment::new()
+			.merge(("presence_idle_timeout_s", IDLE.as_secs()))
+			.merge(("presence_offline_timeout_s", OFFLINE.as_secs()));
+		let Some(fixture) = fixture(config).await? else {
+			return Ok(());
+		};
+
+		let services = &fixture.services;
+		let service = &services.presence;
+		let ghost = user_id!("@ghost:localhost");
+		let online = &PresenceState::Online;
+
+		service
+			.set_presence_for_device(ghost, None, online, None)
+			.await?;
+		let first = rows_of(service, ghost).await;
+		assert_eq!(first.len(), 1, "{first:?}");
+		assert_eq!(timer_set(service), Some((ghost.to_owned(), IDLE, first[0])));
+		assert_eq!(kinds(&logged(services, ghost).await), [Kind::Online]);
+
+		// The same again: no new row, and the timer set again for the row there is.
+		service
+			.set_presence_for_device(ghost, None, online, None)
+			.await?;
+		assert_eq!(rows_of(service, ghost).await, first, "a repeat was written as a new row");
+		assert_eq!(timer_set(service), Some((ghost.to_owned(), IDLE, first[0])));
+		assert_eq!(kinds(&logged(services, ghost).await), [Kind::Online]);
+
+		// A status message is news, once: written when it appears, not when it is repeated, and
+		// written again when it goes.
+		let in_a_call = || Some("in a call".to_owned());
+		service
+			.set_presence_for_device(ghost, None, online, in_a_call())
+			.await?;
+		let second = rows_of(service, ghost).await;
+		assert_eq!(second.len(), 1, "{second:?}");
+		assert!(second[0] > first[0], "a new status message was not written");
+		service
+			.set_presence_for_device(ghost, None, online, in_a_call())
+			.await?;
+		assert_eq!(rows_of(service, ghost).await, second);
+		service
+			.set_presence_for_device(ghost, None, online, None)
+			.await?;
+		let third = rows_of(service, ghost).await;
+		assert!(third[0] > second[0], "a cleared status message was not written");
+		// None of that was coming or going.
+		assert_eq!(kinds(&logged(services, ghost).await), [Kind::Online]);
+
+		// The last repeat, and then silence. Idle is counted from this, not from the row.
+		timer_set(service);
+		let repeated_at = millis_since_unix_epoch();
+		service
+			.set_presence_for_device(ghost, None, online, None)
+			.await?;
+		assert_eq!(rows_of(service, ghost).await, third);
+		let (user, wait, count) = timer_set(service).expect("the repeat set the timer again");
+		assert_eq!((&*user, wait, count), (ghost, IDLE, third[0]));
+
+		sleep(wait.saturating_add(MARGIN)).await;
+		service.process_presence_timer(&user, count).await?;
+		let idle = logged(services, ghost).await;
+		assert_eq!(kinds(&idle), [Kind::Online, Kind::Unavailable]);
+		assert!(
+			idle[1].value >= repeated_at,
+			"last active is when the last repeat came, not when the row was written: {idle:?}"
+		);
+		let now = service.get_presence(ghost).await?.content.presence;
+		assert_eq!(now, PresenceState::Unavailable);
+
+		let (user, wait, count) = timer_set(service).expect("going idle set the offline timer");
+		assert_eq!((&*user, wait), (ghost, OFFLINE));
+		assert_eq!(rows_of(service, ghost).await, [count]);
+
+		sleep(wait.saturating_add(MARGIN)).await;
+		service.process_presence_timer(&user, count).await?;
+		assert_eq!(kinds(&logged(services, ghost).await), [
+			Kind::Online,
+			Kind::Unavailable,
+			Kind::Offline
+		]);
+		let now = service.get_presence(ghost).await?.content.presence;
+		assert_eq!(now, PresenceState::Offline);
+
+		Ok(())
 	}
 }
