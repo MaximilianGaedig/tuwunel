@@ -1,7 +1,9 @@
+use std::collections::HashSet;
+
 use futures::{
 	FutureExt, Stream, StreamExt, future::BoxFuture, pin_mut, stream::FuturesUnordered,
 };
-use ruma::{DeviceId, RoomId, UserId};
+use ruma::{DeviceId, OwnedRoomId, RoomId, UserId};
 use tuwunel_core::{implement, trace};
 use tuwunel_database::{Interfix, Separator, serialize_key};
 
@@ -94,6 +96,18 @@ where
 		);
 	}
 
+	// Typing: one receiver for all the rooms, where each room used to hold its
+	// own and every update was copied to each of them. It subscribes ahead of
+	// the rooms so that it is registered before this fn returns and before any
+	// room is; `wait_for_update` would defer until poll.
+	let mut typing_rx = self
+		.services
+		.typing
+		.typing_update_sender
+		.subscribe();
+
+	let mut typing_rooms: HashSet<OwnedRoomId> = HashSet::new();
+
 	// Drive the rooms stream during phase 1 so per-room watchers register
 	// before this fn returns. Stream items are not retained across cursor
 	// advances; the rocksdb slice contract forbids stashing them.
@@ -144,19 +158,18 @@ where
 				.watch_prefix((room_id, Interfix))
 				.boxed(),
 		);
-		// Typing: subscribe synchronously so the receiver is registered before
-		// this fn returns; `wait_for_update` would defer until poll.
-		let mut typing_rx = self
-			.services
-			.typing
-			.typing_update_sender
-			.subscribe();
+		typing_rooms.insert(room_id.to_owned());
+	}
 
-		let typing_room_id = room_id.to_owned();
+	// Without rooms there is no typing to wait for, and a receiver that fell
+	// behind would wake the caller for nothing.
+	if !typing_rooms.is_empty() {
 		futures.push(
 			async move {
+				// A receiver that fell behind ends the wait as well: it cannot know
+				// what it missed.
 				while let Ok(next) = typing_rx.recv().await {
-					if next == typing_room_id {
+					if typing_rooms.contains(&next) {
 						break;
 					}
 				}
