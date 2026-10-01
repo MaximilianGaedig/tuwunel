@@ -1,12 +1,15 @@
-use std::collections::HashSet;
-
 use axum::extract::State;
-use futures::{FutureExt, StreamExt, pin_mut};
+use futures::{FutureExt, StreamExt, future::join, pin_mut};
 use ruma::{
-	OwnedUserId, UserId,
-	api::client::user_directory::search_users::v3::{Request, Response, User},
+	OwnedMxcUri, OwnedUserId, UInt, UserId,
+	api::{
+		auth_scheme::AccessToken, client::user_directory::search_users::v3::User, request,
+		response,
+	},
 	events::room::join_rules::JoinRule,
+	metadata, uint,
 };
+use serde::{Deserialize, Serialize};
 use tuwunel_core::{
 	Result,
 	utils::{
@@ -15,7 +18,10 @@ use tuwunel_core::{
 		stream::{BroadbandExt, ReadyExt, WidebandExt},
 	},
 };
-use tuwunel_service::{Services, rooms::search::matcher::Matcher};
+use tuwunel_service::{
+	Services, appservice,
+	rooms::search::matcher::{Matcher, Score},
+};
 
 use crate::Ruma;
 
@@ -25,6 +31,64 @@ const LIMIT_DEFAULT: usize = 10;
 
 /// How many candidates to consider per result asked for, so that ranking has something to rank.
 const RANK_WINDOW: usize = 20;
+
+/*
+ * The spec'd endpoint, with our own types.
+ *
+ * ruma's `search_users::v3::Response` holds `Vec<User>`, and `User` is `user_id`, `display_name`,
+ * `avatar_url` and nothing else - so the one line a bridge sends to say *which* Max Mueller this is
+ * was parsed out of its answer and then had nowhere to go. Same paths, same request body, same
+ * response with one optional field more; a client that does not know the field ignores it.
+ *
+ * ruma's request also reads `Accept-Language`. Nothing here ever used it, so it is not declared.
+ */
+metadata! {
+	method: POST,
+	rate_limited: true,
+	authentication: AccessToken,
+	history: {
+		1.0 => "/_matrix/client/r0/user_directory/search",
+		1.1 => "/_matrix/client/v3/user_directory/search",
+	}
+}
+
+#[request]
+pub struct Request {
+	/// The term to search for.
+	pub search_term: String,
+
+	/// The maximum number of results to return. Defaults to 10.
+	#[serde(default = "default_limit")]
+	pub limit: UInt,
+}
+
+#[response]
+pub struct Response {
+	/// Best match first.
+	pub results: Vec<FoundUser>,
+
+	/// Whether there were more matches than fit.
+	pub limited: bool,
+}
+
+/// One search result: the spec's `User`, and the line that tells namesakes apart.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct FoundUser {
+	pub user_id: OwnedUserId,
+
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub display_name: Option<String>,
+
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub avatar_url: Option<OwnedMxcUri>,
+
+	/// What the person's own network shows under their name: mutual friends, a place, a handle.
+	/// Only ever set for somebody an appservice found, and only when it sent one.
+	#[serde(default, rename = "im.mxg.context", skip_serializing_if = "Option::is_none")]
+	pub context: Option<String>,
+}
+
+fn default_limit() -> UInt { uint!(10) }
 
 /// # `POST /_matrix/client/r0/user_directory/search`
 ///
@@ -40,6 +104,8 @@ const RANK_WINDOW: usize = 20;
 ///   together with the local users rather than after them. Answering creates the
 ///   puppet, so the result is an ordinary user and every client benefits without knowing any of
 ///   this.
+/// - Answers within the appservices' deadline whatever they do: they are asked while the local
+///   users are read, all at once, and one that is slow is left out rather than waited for.
 pub(crate) async fn search_users_route(
 	State(services): State<crate::State>,
 	body: Ruma<Request>,
@@ -98,13 +164,10 @@ pub(crate) async fn search_users_route(
 	 */
 	let ceiling = limit.saturating_mul(RANK_WINDOW).min(LIMIT_MAX);
 	pin_mut!(users);
-	let mut scored: Vec<(u32, bool, User)> = users
+	let local = users
 		.by_ref()
 		.take(ceiling)
-		.map(|(score, user)| (score, false, user))
-		.collect()
-		.await;
-	let mut limited = users.next().await.is_some();
+		.collect::<Vec<(Score, User)>>();
 
 	/*
 	 * What this server knows and what the networks know, ranked together.
@@ -115,54 +178,37 @@ pub(crate) async fn search_users_route(
 	 * The bridges can answer about their own networks, and answering creates the puppet, so what
 	 * comes back is an ordinary user any client can open a chat with.
 	 *
-	 * The networks are asked whichever way the local search went, and the two are then ranked as
-	 * one list rather than local-first-then-the-rest. Concatenating, as this did at first, means
-	 * the person being looked for falls off the end precisely when the server happens to know a
-	 * page full of others whose names also match - which is the same failure one level down.
+	 * The networks are asked whichever way the local search goes, and at the same time as it runs:
+	 * they have a deadline of their own, and reading the local users first would only add to it.
+	 * The two are then ranked as one list rather than local-first-then-the-rest. Concatenating, as
+	 * this did at first, means the person being looked for falls off the end precisely when the
+	 * server happens to know a page full of others whose names also match - which is the same
+	 * failure one level down. The rule for putting them together is merge_user_directory's.
 	 */
-	let known: HashSet<OwnedUserId> = scored
-		.iter()
-		.map(|(_, _, user)| user.user_id.clone())
-		.collect();
+	let remote = services
+		.appservice
+		.search_users(sender_user, search_term, limit);
 
-	scored.extend(
-		services
-			.appservice
-			.search_users(sender_user, &search_term, limit)
-			.await
-			.into_iter()
-			.filter(|user| !known.contains(&user.user_id))
-			.map(|user| {
-				// A bridge matched this person by its own network's rules, which may know something
-				// we cannot see - a handle, a phone number - so one that does not match ours is
-				// ranked last rather than thrown away.
-				let score = [user.display_name.as_deref(), Some(user.user_id.localpart())]
-					.into_iter()
-					.flatten()
-					.filter_map(|text| matcher.score(text))
-					.max()
-					.unwrap_or(0);
+	let (local, (remote, remote_limited)) = join(local, remote).await;
+	let local_limited = users.next().await.is_some();
 
-				(score, true, user)
-			}),
+	let (merged, limited) = appservice::Service::merge_user_directory(
+		&matcher,
+		local,
+		local_limited,
+		remote,
+		remote_limited,
+		limit,
 	);
 
-	limited |= scored.len() > limit;
-
-	// Best first; then what this server already knows, which is someone with a history worth
-	// putting above a stranger of equal standing; then a stable tie-break so the same search
-	// twice gives the same answer.
-	scored.sort_by(|(left, left_bridged, left_user), (right, right_bridged, right_user)| {
-		right
-			.cmp(left)
-			.then_with(|| left_bridged.cmp(right_bridged))
-			.then_with(|| left_user.user_id.cmp(&right_user.user_id))
-	});
-
-	let results: Vec<User> = scored
+	let results: Vec<FoundUser> = merged
 		.into_iter()
-		.take(limit)
-		.map(|(_, _, user)| user)
+		.map(|(user, context)| FoundUser {
+			user_id: user.user_id,
+			display_name: user.display_name,
+			avatar_url: user.avatar_url,
+			context,
+		})
 		.collect();
 
 	Ok(Response { results, limited })
