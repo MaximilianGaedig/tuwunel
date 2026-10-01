@@ -43,13 +43,17 @@ pub struct RoomQuery<'a> {
 	pub skip: usize,
 }
 
-/// How long a message may wait before it is searchable.
+/// How long a message may wait before it is committed, which is what makes it searchable.
 ///
-/// An index becomes readable when it is committed, and committing per message would cost a file
-/// write per message. So the worker commits on a timer, which is what Elasticsearch calls a refresh
-/// interval and for the same reason. Half a second is below what anyone notices between sending a
-/// message and finding it.
-const COMMIT_EVERY: Duration = Duration::from_millis(500);
+/// Committing per message would cost a file write per message, so the worker commits on a timer,
+/// which is what Elasticsearch calls a refresh interval and for the same reason. Elasticsearch's
+/// default is this same second. The reader notices a commit within another half second (tantivy
+/// polls for it), so a message is found at most a second and a half after it was sent, plus the
+/// commit itself; half the interval would only halve the first part, and would write twice as
+/// many segments while a bridge is filling in history.
+///
+/// A tick with nothing to commit does nothing at all: see [`Engine::commit`].
+const COMMIT_EVERY: Duration = Duration::from_secs(1);
 
 /// Which rules the index was built by. Raise it whenever what is indexed, or how it is cut into
 /// words, changes (see [`searchable_text`] and the tokenizer in `engine`): history indexed by the
@@ -150,13 +154,25 @@ impl crate::Service for Service {
 				() = sleep(COMMIT_EVERY) => {},
 			}
 
-			if let Err(e) = self.engine.commit() {
-				error!("Could not commit the search index: {e}");
+			// Most ticks of most servers have nothing waiting, and a commit of nothing is still a
+			// file rewritten and synced. So ask first, which is one atomic read.
+			if !self.engine.is_dirty() {
+				continue;
+			}
+
+			// A commit writes and syncs files: keep it off the async threads.
+			let this = self.clone();
+			match tokio::task::spawn_blocking(move || this.engine.commit()).await {
+				| Ok(Ok(_)) => {},
+				| Ok(Err(e)) => error!("Could not commit the search index: {e}"),
+				| Err(e) => error!("Committing the search index did not finish: {e}"),
 			}
 		}
 
-		// Whatever arrived since the last tick, so a restart does not lose it.
-		self.engine.commit()
+		// Whatever arrived since the last tick, so a restart does not lose it. Done here rather
+		// than on a blocking thread: the runtime is on its way down, and this must not be
+		// skipped.
+		self.engine.commit().map(|_| ())
 	}
 
 	fn name(&self) -> &str { crate::service::make_name(std::module_path!()) }
@@ -220,6 +236,8 @@ pub async fn rebuild_words(&self) -> Result<usize> {
 		}
 	}
 
+	// The worker's timer has been committing all along; this is the remainder, and it has to be
+	// on disk before the version says the history is whole.
 	self.engine.commit()?;
 	self.global.raw_put(INDEX_VERSION_KEY, INDEX_VERSION);
 
@@ -310,14 +328,111 @@ pub async fn delete_all_search_tokenids_for_room(&self, room_id: &RoomId) -> Res
 	};
 
 	self.engine.remove_room(shortroomid)?;
-	self.engine.commit()
+	self.engine.commit().map(|_| ())
 }
 
 #[cfg(test)]
 mod tests {
-	use ruma::events::TimelineEventType;
+	use std::{fs, path::Path, time::SystemTime};
 
-	use super::{INDEX_VERSION, REBUILDING, Startup, searchable_text, startup_action};
+	use ruma::events::TimelineEventType;
+	use tokio::time::{Duration, sleep};
+	use tuwunel_core::{Result, config::Figment};
+
+	use super::{
+		COMMIT_EVERY, INDEX_VERSION, REBUILDING, Startup, searchable_text, startup_action,
+	};
+	use crate::test_utils::{fixture, pdu_id};
+
+	/// When the index last wrote the file that every commit rewrites.
+	fn committed_at(index: &Path) -> Result<SystemTime> {
+		Ok(fs::metadata(index.join("meta.json"))?.modified()?)
+	}
+
+	/// Longer than the coarsest clock a filesystem stamps a file with, so a rewrite shows.
+	const A_MOMENT: Duration = Duration::from_millis(50);
+
+	// The reason the worker asks before it commits: tantivy rewrites and syncs `meta.json` on
+	// every commit, also on one with nothing in it, and the live server did that twice a second
+	// with nobody writing. A commit with nothing waiting must leave the file alone, and one with
+	// something waiting must still happen - for an added message, a removed one, and a removed
+	// room alike. The first rewrite seen here also shows that the file's time is worth reading.
+	#[tokio::test]
+	async fn only_a_commit_with_something_waiting_writes_the_index() -> Result {
+		let Some(fixture) = fixture(Figment::new()).await? else {
+			return Ok(());
+		};
+
+		let service = &fixture.services.search;
+		let engine = &service.engine;
+		let index = service.server.config.database_path.join("search");
+
+		let opened = committed_at(&index)?;
+		sleep(A_MOMENT).await;
+		assert!(!engine.is_dirty());
+		assert!(!engine.commit()?, "a commit of nothing said it committed");
+		assert_eq!(committed_at(&index)?, opened, "a commit of nothing wrote the index");
+
+		service.index_pdu(1, &pdu_id(1), "hello there");
+		assert!(engine.is_dirty());
+		assert!(engine.commit()?);
+		assert!(!engine.is_dirty());
+		let added = committed_at(&index)?;
+		assert_ne!(added, opened, "a commit of a message did not write the index");
+
+		sleep(A_MOMENT).await;
+		assert!(!engine.commit()?);
+		assert_eq!(committed_at(&index)?, added, "the second commit of one message wrote again");
+
+		service.deindex_pdu(1, &pdu_id(1), "hello there");
+		assert!(engine.is_dirty(), "a removed message is not waiting for a commit");
+		assert!(engine.commit()?);
+		assert!(!engine.commit()?);
+
+		engine.remove_room(1)?;
+		assert!(engine.is_dirty(), "a removed room is not waiting for a commit");
+		assert!(engine.commit()?);
+
+		// Clearing commits by itself, and takes with it what was waiting.
+		service.index_pdu(1, &pdu_id(2), "to be cleared");
+		engine.clear()?;
+		assert!(!engine.is_dirty());
+		let cleared = committed_at(&index)?;
+		sleep(A_MOMENT).await;
+		assert!(!engine.commit()?);
+		assert_eq!(committed_at(&index)?, cleared);
+
+		Ok(())
+	}
+
+	// The other half: what is committed can be found, and what is not yet committed cannot. The
+	// reader picks a commit up by itself a little later, so this waits for it rather than asking
+	// once - but not for long: the interval and the reader's delay are what the comment on
+	// COMMIT_EVERY promises.
+	#[tokio::test]
+	async fn a_message_is_found_once_it_is_committed() -> Result {
+		let Some(fixture) = fixture(Figment::new()).await? else {
+			return Ok(());
+		};
+
+		let service = &fixture.services.search;
+		let engine = &service.engine;
+		let found = || engine.search(1, "hello", 0, 10).map(|found| found.count);
+
+		service.index_pdu(1, &pdu_id(1), "hello there");
+		assert_eq!(found()?, 0, "found before it was committed");
+		assert!(engine.commit()?);
+
+		let mut waited = Duration::ZERO;
+		while found()? == 0 && waited < COMMIT_EVERY.saturating_mul(10) {
+			sleep(A_MOMENT).await;
+			waited = waited.saturating_add(A_MOMENT);
+		}
+		assert_eq!(found()?, 1, "not found {waited:?} after it was committed");
+		assert!(!engine.is_empty());
+
+		Ok(())
+	}
 
 	#[test]
 	fn history_indexed_by_older_rules_is_indexed_again() {
