@@ -161,6 +161,9 @@ impl Engine {
 		Ok(())
 	}
 
+	/// Whether nothing has been committed to the index yet.
+	pub(super) fn is_empty(&self) -> bool { self.reader.searcher().num_docs() == 0 }
+
 	/// Makes everything added so far searchable.
 	pub(super) fn commit(&self) -> Result {
 		self.writer
