@@ -25,9 +25,9 @@ use tuwunel_service::Services;
 
 use self::client::{Client, field, register, wait_until_ready};
 
-const ALICE: &str = "activity-log-alice-token";
-const BOB: &str = "activity-log-bob-token";
-const CAROL: &str = "activity-log-carol-token";
+const ALICE: &str = "activity-log-test-access-token-alice";
+const BOB: &str = "activity-log-test-access-token-bob";
+const CAROL: &str = "activity-log-test-access-token-carol";
 
 /// Rows are keyed by the millisecond, so two of a kind in the same one would be one row. Nothing
 /// here is that fast in practice; the pause makes the order a fact rather than a likelihood.
