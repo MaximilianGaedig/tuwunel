@@ -32,11 +32,12 @@ use ruma::{
 	serde::Raw,
 	uint,
 };
+use serde::Deserialize;
 use tokio::time;
 use tuwunel_core::{
 	Error, Result, at, debug,
 	debug::INFO_SPAN_LEVEL,
-	debug_error, err,
+	debug_error, debug_warn, err,
 	error::{inspect_debug_log, inspect_log},
 	extract_variant, is_equal_to, is_false, is_true,
 	matrix::{
@@ -1033,40 +1034,11 @@ async fn handle_left_room(
 	if is_not_found.or(is_disabled).or(is_banned).await {
 		// For rejected invites, deleted, missing, or broken room state this is the last
 		// resort to convey a the minimum of information to the client.
-		let event = PduEvent {
-			event_id: EventId::new_v1(services.globals.server_name()),
-			origin_server_ts: utils::millis_since_unix_epoch().try_into()?,
-			kind: RoomMember,
-			state_key: Some(sender_user.as_str().into()),
-			sender: sender_user.to_owned(),
-			content: serde_json::from_str(r#"{"membership":"leave"}"#)?,
-			// The following keys are dropped on conversion
-			room_id: room_id.clone(),
-			depth: uint!(1),
-			origin: None,
-			unsigned: None,
-			redacts: None,
-			hashes: EventHash::default(),
-			auth_events: Default::default(),
-			prev_events: Default::default(),
-		};
-
-		let state = state_after.wrap(StateEvents {
-			events: vec![trim_event_fields(event.into_format(), filter.event_fields.as_deref())],
-		});
-
-		return Ok(Some(LeftRoom {
-			account_data: RoomAccountData::default(),
-			state,
-			timeline: Timeline {
-				limited: false,
-				events: Default::default(),
-				prev_batch: Some(left_count.to_string()),
-			},
-		}));
+		return minimal_left_room(services, room_id, sender_user, left_count, state_after, filter)
+			.map(Some);
 	}
 
-	load_left_room(
+	let loaded = load_left_room(
 		services,
 		sender_user,
 		room_id,
@@ -1076,7 +1048,107 @@ async fn handle_left_room(
 		state_after,
 		filter,
 	)
-	.await
+	.await;
+
+	// A leave is told once: from the next token on, the room is not looked at
+	// again. So what is sent here has to be enough for the client to know it
+	// left, and a client knows that from its own membership event and nothing
+	// else. A room being deleted gives neither guarantee: its users leave
+	// without an event in the room, and the room is then purged while this
+	// runs, so loading it either finds no such event or fails part-way.
+	// Either of those used to leave the room in the client's list for good.
+	match loaded {
+		| Ok(Some(room)) if tells_own_leave(&room, sender_user) => Ok(Some(room)),
+		| Ok(None) => Ok(None),
+		| loaded => {
+			if let Err(e) = loaded {
+				debug_warn!(%room_id, %sender_user, "Left room could not be loaded: {e}");
+			}
+
+			minimal_left_room(services, room_id, sender_user, left_count, state_after, filter)
+				.map(Some)
+		},
+	}
+}
+
+/// The least a client needs to know it is no longer in a room: its own leave,
+/// made up here, for a room that has no such event to give.
+fn minimal_left_room(
+	services: &Services,
+	room_id: &RoomId,
+	sender_user: &UserId,
+	left_count: u64,
+	state_after: StateAfter,
+	filter: &FilterDefinition,
+) -> Result<LeftRoom> {
+	let event = PduEvent {
+		event_id: EventId::new_v1(services.globals.server_name()),
+		origin_server_ts: utils::millis_since_unix_epoch().try_into()?,
+		kind: RoomMember,
+		state_key: Some(sender_user.as_str().into()),
+		sender: sender_user.to_owned(),
+		content: serde_json::from_str(r#"{"membership":"leave"}"#)?,
+		// The following keys are dropped on conversion
+		room_id: room_id.to_owned(),
+		depth: uint!(1),
+		origin: None,
+		unsigned: None,
+		redacts: None,
+		hashes: EventHash::default(),
+		auth_events: Default::default(),
+		prev_events: Default::default(),
+	};
+
+	let state = state_after.wrap(StateEvents {
+		events: vec![trim_event_fields(event.into_format(), filter.event_fields.as_deref())],
+	});
+
+	Ok(LeftRoom {
+		account_data: RoomAccountData::default(),
+		state,
+		timeline: Timeline {
+			limited: false,
+			events: Default::default(),
+			prev_batch: Some(left_count.to_string()),
+		},
+	})
+}
+
+/// Whether what is about to be sent for a left room carries the user's own
+/// membership event saying they are out of it (left, or banned).
+fn tells_own_leave(room: &LeftRoom, sender_user: &UserId) -> bool {
+	#[derive(Deserialize)]
+	struct Membership {
+		membership: MembershipState,
+	}
+
+	#[derive(Deserialize)]
+	struct Member<'a> {
+		#[serde(rename = "type")]
+		kind: &'a str,
+		state_key: Option<&'a str>,
+		content: Membership,
+	}
+
+	let is_own_leave = |event: &str| {
+		serde_json::from_str::<Member<'_>>(event).is_ok_and(|event| {
+			event.kind == "m.room.member"
+				&& event.state_key == Some(sender_user.as_str())
+				&& matches!(event.content.membership, MembershipState::Leave | MembershipState::Ban)
+		})
+	};
+
+	let state = match &room.state {
+		| RoomState::Before(state) | RoomState::After(state) | RoomState::AfterUnstable(state) =>
+			state.events.as_slice(),
+		| _ => &[],
+	};
+
+	state
+		.iter()
+		.map(|event| event.json().get())
+		.chain(room.timeline.events.iter().map(|event| event.json().get()))
+		.any(is_own_leave)
 }
 
 #[tracing::instrument(name = "load", level = "debug", skip_all)]
