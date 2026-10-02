@@ -109,7 +109,7 @@ impl Service {
 
 		self.services
 			.activity_log
-			.log_read(user_id, room_id)
+			.log_read(user_id, room_id, receipt_ts(user_id, event))
 			.await;
 
 		self.services
@@ -511,4 +511,17 @@ where
 	let event = to_raw_value(&SyncEphemeralRoomEvent { content })?;
 
 	Ok(Raw::from_json(event))
+}
+
+/// When the receipt says its user read, if it says.
+fn receipt_ts(user_id: &UserId, event: &ReceiptEvent) -> Option<u64> {
+	event
+		.content
+		.0
+		.values()
+		.flat_map(BTreeMap::values)
+		.filter_map(|users| users.get(user_id))
+		.filter_map(|receipt| receipt.ts)
+		.map(|ts| ts.0.into())
+		.max()
 }

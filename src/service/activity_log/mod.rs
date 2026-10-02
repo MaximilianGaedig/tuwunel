@@ -258,11 +258,14 @@ pub async fn log_typing(&self, user_id: &UserId, room_id: &RoomId) {
 	}
 }
 
-/// Records a read receipt.
+/// Records a read receipt at the time it says it was earned. That is now for
+/// someone reading in their client, and earlier for one a bridge replays or
+/// another server passes on.
 #[implement(Service)]
-pub async fn log_read(&self, user_id: &UserId, room_id: &RoomId) {
+pub async fn log_read(&self, user_id: &UserId, room_id: &RoomId, ts: Option<u64>) {
 	if let Ok(shortroomid) = self.services.short.get_shortroomid(room_id).await {
-		self.put(user_id, millis_since_unix_epoch(), Kind::Read, shortroomid);
+		let ts = read_time(ts, millis_since_unix_epoch());
+		self.put(user_id, ts, Kind::Read, shortroomid);
 	}
 }
 
@@ -414,6 +417,13 @@ pub fn kinds_named(list: &str) -> Result<Vec<Kind>, String> {
 /// Whether a last-active time can be one: not after now, give or take a clock.
 const fn seen_is_past(ts: u64, now: u64) -> bool { ts > 0 && ts <= now.saturating_add(60_000) }
 
+/// When a read receipt counts as read: when it says, unless that is no time
+/// or one that hasn't come.
+fn read_time(ts: Option<u64>, now: u64) -> u64 {
+	ts.filter(|&ts| seen_is_past(ts, now))
+		.unwrap_or(now)
+}
+
 /// Whether typing at `now` starts a new burst, given when the last was written.
 const fn typing_is_new(last: Option<u64>, now: u64) -> bool {
 	match last {
@@ -559,8 +569,8 @@ mod tests {
 	use ruma::events::TimelineEventType;
 
 	use super::{
-		DAY_MS, Entry, HOUR_MS, Kind, WeekFold, kind_of_event, seen_is_past, typing_is_new,
-		weekday_of,
+		DAY_MS, Entry, HOUR_MS, Kind, WeekFold, kind_of_event, read_time, seen_is_past,
+		typing_is_new, weekday_of,
 	};
 
 	// Monday 2024-01-01 00:00 UTC.
@@ -725,6 +735,16 @@ mod tests {
 		assert!(seen_is_past(at, at + HOUR_MS));
 		assert!(!seen_is_past(at + DAY_MS, at), "a time that hasn't come");
 		assert!(!seen_is_past(0, at), "no time at all");
+	}
+
+	#[test]
+	fn a_receipt_is_logged_when_it_was_earned() {
+		let now = MONDAY + 14 * HOUR_MS;
+
+		assert_eq!(read_time(Some(MONDAY), now), MONDAY, "a replayed receipt");
+		assert_eq!(read_time(None, now), now, "a receipt that names no time");
+		assert_eq!(read_time(Some(0), now), now);
+		assert_eq!(read_time(Some(now + DAY_MS), now), now, "a time that hasn't come");
 	}
 
 	#[test]
