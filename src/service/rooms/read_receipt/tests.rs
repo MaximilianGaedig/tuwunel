@@ -4,7 +4,10 @@ use ruma::{RoomId, UserId};
 use tuwunel_core::matrix::pdu::PduCount;
 use tuwunel_database::{Interfix, SEP, serialize_to_vec};
 
-use super::{data::position_advances, thread_kind_to_receipt};
+use super::{
+	data::{position_advances, read_time_corrected},
+	thread_kind_to_receipt,
+};
 
 const ROOM: &str = "!room:example.com";
 const USER: &str = "@user:example.com";
@@ -120,6 +123,15 @@ fn position_advance_matrix() {
 	assert!(!position_advances(normal(3), normal(2)), "lower position rejects");
 	assert!(position_advances(backfilled(-1), normal(1)), "normal advances past backfilled");
 	assert!(!position_advances(normal(1), backfilled(-1)), "backfilled sorts below normal");
+}
+
+#[test]
+fn only_an_earlier_time_corrects_when_an_event_was_read() {
+	assert!(read_time_corrected(Some(2000), Some(1000)), "it was read before we were told");
+	assert!(!read_time_corrected(Some(1000), Some(1000)), "the same time again");
+	assert!(!read_time_corrected(Some(1000), Some(2000)), "the same read reported again later");
+	assert!(!read_time_corrected(None, Some(1000)), "nothing held to correct");
+	assert!(!read_time_corrected(Some(1000), None), "no time to correct it with");
 }
 
 #[test]

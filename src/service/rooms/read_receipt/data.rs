@@ -116,7 +116,7 @@ impl Data {
 				let current = superseded
 					.is_empty()
 					.then_some(val)
-					.and_then(stored_event_id)
+					.and_then(|val| stored_event_id(val).map(|id| (id, stored_ts(val))))
 					.or(current);
 
 				superseded.push(key.into());
@@ -125,9 +125,18 @@ impl Data {
 			})
 			.await;
 
-		if !self
-			.receipt_advanced(current.as_deref(), event_id)
-			.await
+		let (current, current_ts) = current.map_or((None, None), |(id, ts)| (Some(id), ts));
+
+		// The same event again is no news, unless it comes with an earlier
+		// time: a bridge that first passed a read on without saying when now
+		// says when it was. That is the time to keep.
+		let corrected = current.as_ref() == Some(event_id)
+			&& read_time_corrected(current_ts, incoming_ts(event));
+
+		if !corrected
+			&& !self
+				.receipt_advanced(current.as_deref(), event_id)
+				.await
 		{
 			return false;
 		}
@@ -572,6 +581,45 @@ fn stored_event_id(val: &[u8]) -> Option<OwnedEventId> {
 		.content
 		.into_keys()
 		.next()
+}
+
+/// When a stored receipt row says its event was read, if it says.
+fn stored_ts(val: &[u8]) -> Option<u64> {
+	serde_json::from_slice::<serde_json::Value>(val)
+		.ok()?
+		.get("content")?
+		.as_object()?
+		.values()
+		.next()?
+		.as_object()?
+		.values()
+		.next()?
+		.as_object()?
+		.values()
+		.next()?
+		.get("ts")?
+		.as_u64()
+}
+
+/// When an incoming receipt says its event was read, if it says.
+fn incoming_ts(event: &ReceiptEvent) -> Option<u64> {
+	event
+		.content
+		.values()
+		.next()
+		.and_then(|by_type| by_type.values().next())
+		.and_then(|by_user| by_user.values().next())
+		.and_then(|receipt| receipt.ts)
+		.map(|ts| ts.0.into())
+}
+
+/// Whether a receipt for the event already held corrects when it was read:
+/// it names an earlier time than the one stored. A later time is the same
+/// read reported again, and no time is nothing to go by.
+pub(super) fn read_time_corrected(stored: Option<u64>, incoming: Option<u64>) -> bool {
+	stored
+		.zip(incoming)
+		.is_some_and(|(stored, incoming)| incoming < stored)
 }
 
 /// Whether an incoming receipt position strictly advances the stored one.
