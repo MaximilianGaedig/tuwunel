@@ -6,8 +6,8 @@ use std::{
 use axum::extract::State;
 use futures::{
 	FutureExt, StreamExt, TryFutureExt, TryStreamExt,
-	future::{join, join3, join4, join5, try_join},
-	pin_mut,
+	future::{join, join3, join4, join5, pending, select, try_join},
+	pin_mut, stream,
 };
 use ruma::{
 	DeviceId, EventId, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, UInt, UserId,
@@ -67,6 +67,7 @@ use tuwunel_service::{
 		read_receipt::PrivateReadEvents,
 		short::{ShortEventId, ShortStateHash, ShortStateKey},
 	},
+	sync::RoomScope,
 	users::InviteFilter,
 };
 
@@ -88,6 +89,7 @@ struct SyncParams<'a> {
 	full_state: bool,
 	state_after: StateAfter,
 	filter: &'a FilterDefinition,
+	scope: RoomScope,
 }
 
 #[derive(Default)]
@@ -307,16 +309,29 @@ pub(crate) async fn sync_events_route(
 		.checked_add(Duration::from_millis(timeout))
 		.expect("configuration must limit maximum timeout");
 
+	// A filter that lets no room event through spares the walk over the rooms
+	// below, and with it the watchers on each of them.
+	let scope = RoomScope::of(&filter);
+
 	loop {
-		let watch_rooms = services
-			.state_cache
-			.rooms_joined(sender_user)
-			.chain(services.state_cache.rooms_invited(sender_user));
+		let watch_rooms = scope.reports_rooms().then(|| {
+			services
+				.state_cache
+				.rooms_joined(sender_user)
+				.chain(services.state_cache.rooms_invited(sender_user))
+		});
 
 		let watchers = services
 			.sync
-			.watch(sender_user, sender_device, watch_rooms)
+			.watch(sender_user, sender_device, stream::iter(watch_rooms).flatten())
 			.await;
+
+		// With no room watched, what still concerns this client about the rooms
+		// is whose device lists changed. One subscription to every write that
+		// can change one stands in for the watchers on each room. It is made
+		// before the state is sampled, as the watchers are.
+		let device_lists = matches!(scope, RoomScope::DeviceLists)
+			.then(|| services.sync.watch_device_lists());
 
 		let next_batch = services.globals.wait_pending().await?;
 		if since.is_some_and(|since| since > next_batch) {
@@ -334,6 +349,7 @@ pub(crate) async fn sync_events_route(
 				full_state,
 				state_after,
 				filter: &filter,
+				scope,
 			})
 			.await?;
 
@@ -350,7 +366,19 @@ pub(crate) async fn sync_events_route(
 		}
 
 		// Wait for activity
-		if time::timeout_at(stop_at, watchers).await.is_err() || services.server.is_stopping() {
+		let activity = async {
+			let device_lists = async {
+				match device_lists {
+					| Some(written) => written.await,
+					| None => pending().await,
+				}
+			};
+
+			pin_mut!(watchers, device_lists);
+			select(watchers, device_lists).await;
+		};
+
+		if time::timeout_at(stop_at, activity).await.is_err() || services.server.is_stopping() {
 			let response =
 				build_empty_response(&services, sender_user, sender_device, next_batch).await;
 
@@ -419,6 +447,7 @@ async fn build_sync_events(
 		full_state,
 		state_after,
 		filter,
+		scope,
 	}: SyncParams<'_>,
 ) -> Result<sync_events::v3::Response> {
 	let profile_since = since;
@@ -437,6 +466,7 @@ async fn build_sync_events(
 		full_state,
 		state_after,
 		filter,
+		scope,
 	);
 
 	let left_rooms = collect_left_rooms(
@@ -572,43 +602,212 @@ fn collect_joined_rooms<'a>(
 	full_state: bool,
 	state_after: StateAfter,
 	filter: &'a FilterDefinition,
+	scope: RoomScope,
 ) -> impl Future<
 	Output = (BTreeMap<OwnedRoomId, JoinedRoom>, HashSet<OwnedUserId>, HashSet<OwnedUserId>),
 > + Send
 + 'a {
+	// An initial sync and a full-state one report every room whatever happened
+	// in it, and a token from before the activity record began asks about
+	// writes the record never saw. All three load every room, as before.
+	let skip_unchanged = since != 0 && !full_state && services.sync.activity_covers(since);
+
+	// When the filter lets no room event through, the rooms are still loaded
+	// for the device lists they change and then left out of the response.
+	let reports_rooms = scope.reports_rooms();
+
 	services
 		.state_cache
 		.rooms_joined(sender_user)
+		.ready_take_while(move |_| !matches!(scope, RoomScope::Nothing))
 		.ready_filter(|&room_id| filter.room.matches(room_id))
 		.map(ToOwned::to_owned)
-		.broad_filter_map(move |room_id| {
-			load_joined_room(
+		.broad_filter_map(move |room_id: OwnedRoomId| {
+			load_changed_room(
 				services,
 				sender_user,
 				sender_device,
-				room_id.clone(),
+				room_id,
 				since,
 				next_batch,
 				full_state,
 				state_after,
 				filter,
+				skip_unchanged,
 			)
-			.map_ok(move |(joined_room, dlu, jeu)| (room_id, joined_room, dlu, jeu))
-			.ok()
 		})
 		.ready_fold(
 			(BTreeMap::new(), HashSet::new(), HashSet::new()),
-			|(mut joined_rooms, mut device_list_updates, mut left_encrypted_users),
-			 (room_id, joined_room, dlu, leu)| {
+			move |(mut joined_rooms, mut device_list_updates, mut left_encrypted_users),
+			      (room_id, joined_room, dlu, leu)| {
 				device_list_updates.extend(dlu);
 				left_encrypted_users.extend(leu);
-				if !joined_room.is_empty() {
+				if reports_rooms && !joined_room.is_empty() {
 					joined_rooms.insert(room_id, joined_room);
 				}
 
 				(joined_rooms, device_list_updates, left_encrypted_users)
 			},
 		)
+}
+
+/// Loads a joined room, unless the round may skip rooms and this one has
+/// nothing to report.
+#[expect(clippy::too_many_arguments)]
+async fn load_changed_room(
+	services: &Services,
+	sender_user: &UserId,
+	sender_device: Option<&DeviceId>,
+	room_id: OwnedRoomId,
+	since: u64,
+	next_batch: u64,
+	full_state: bool,
+	state_after: StateAfter,
+	filter: &FilterDefinition,
+	skip_unchanged: bool,
+) -> Option<(OwnedRoomId, JoinedRoom, HashSet<OwnedUserId>, HashSet<OwnedUserId>)> {
+	if skip_unchanged && room_unchanged(services, sender_user, &room_id, since, next_batch).await
+	{
+		return None;
+	}
+
+	load_joined_room(
+		services,
+		sender_user,
+		sender_device,
+		room_id.clone(),
+		since,
+		next_batch,
+		full_state,
+		state_after,
+		filter,
+	)
+	.await
+	.ok()
+	.map(move |(joined_room, dlu, leu)| (room_id, joined_room, dlu, leu))
+}
+
+/// Whether an incremental round has nothing to report for a joined room, so
+/// that [`load_joined_room`] need not run for it.
+///
+/// What that function reports comes from three places, each answered here:
+///
+/// - Rows written within the round's window: timeline events and the state,
+///   summary, membership and lazy-loading consequences that only a timeline
+///   event brings; receipts and the private read marker; room account data
+///   and tags; a read cursor moving, for the room or for a thread; device-list
+///   changes. The activity record is told of every write to the maps those
+///   rows live in, and its mark says whether one could carry a count past
+///   `since`.
+/// - The typing state, which is in memory and asked the same question the
+///   load asks it.
+/// - Two standing conditions that make the load report something with no
+///   write at all, see [`reports_unprompted`].
+///
+/// A room is skipped only when all three have nothing. Whatever cannot be
+/// answered keeps the room in.
+async fn room_unchanged(
+	services: &Services,
+	sender_user: &UserId,
+	room_id: &RoomId,
+	since: u64,
+	next_batch: u64,
+) -> bool {
+	// Read before the room is examined: a write landing meanwhile changes the
+	// stamp, and what was found under the old one is not trusted again.
+	let Some(stamp) = services.sync.room_activity(room_id).await else {
+		return false;
+	};
+
+	if stamp.mark > since {
+		return false;
+	}
+
+	// As `gather_typing_events`: an update past the token is reported, and a
+	// failure to read reports nothing.
+	let typing_changed = services
+		.typing
+		.last_typing_update(room_id)
+		.await
+		.is_ok_and(|count| count > since);
+
+	if typing_changed {
+		return false;
+	}
+
+	let activity = &services.sync.activity;
+	if activity.is_quiet(sender_user, room_id, stamp) {
+		return true;
+	}
+
+	let quiet = !reports_unprompted(services, sender_user, room_id, next_batch).await;
+	if quiet {
+		activity.set_quiet(sender_user, room_id, stamp);
+	}
+
+	quiet
+}
+
+/// Whether loading a joined room would report something although nothing was
+/// written to it since the token.
+///
+/// - A room with no event in its normal timeline counts as changed on every
+///   round, and gets its state sent again.
+/// - A room whose reader has no read cursor yet reports its unread counts on
+///   every round, as long as any of them is not zero. With a cursor they are
+///   reported only when the cursor moves, which is a write.
+///
+/// Neither depends on the token, and both can only change through a write to
+/// the room. The caller therefore remembers a negative answer until the next
+/// write instead of asking the database again on every round.
+async fn reports_unprompted(
+	services: &Services,
+	sender_user: &UserId,
+	room_id: &RoomId,
+	next_batch: u64,
+) -> bool {
+	let has_timeline = services
+		.timeline
+		.last_timeline_count(None, room_id, Some(PduCount::Normal(next_batch)))
+		.await
+		.is_ok_and(|count| count != PduCount::max());
+
+	if !has_timeline {
+		return true;
+	}
+
+	let has_cursor = services
+		.pusher
+		.last_notification_read(sender_user, room_id)
+		.await
+		.is_ok();
+
+	if has_cursor {
+		return false;
+	}
+
+	let notification_count = services
+		.pusher
+		.notification_count(sender_user, room_id);
+
+	let highlight_count = services
+		.pusher
+		.highlight_count(sender_user, room_id);
+
+	// Thread counts are folded into the room's unless the filter splits them
+	// out. Counting them either way errs towards loading the room.
+	let thread_counts = services
+		.pusher
+		.thread_notification_counts(sender_user, room_id);
+
+	let (notification_count, highlight_count, thread_counts) =
+		join3(notification_count, highlight_count, thread_counts).await;
+
+	notification_count != 0
+		|| highlight_count != 0
+		|| thread_counts
+			.values()
+			.any(|&(notifications, highlights)| notifications != 0 || highlights != 0)
 }
 
 fn collect_left_rooms<'a>(

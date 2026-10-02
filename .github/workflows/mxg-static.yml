@@ -43,7 +43,7 @@ jobs:
           # its own that links the whole server. Upstream runs them in its docker bake on its own
           # runners; here only the fork's own are run, by name.
           - suite: integration
-            tests: -p tuwunel --test activity_log --test room_export --test user_directory --test user_directory_fanout
+            tests: -p tuwunel --test activity_log --test room_export --test user_directory --test user_directory_fanout --test sync_skip_unchanged
     # A newer push to the same branch makes the verdict on the older one worthless.
     concurrency:
       group: mxg-test-${{ matrix.suite }}-${{ github.ref }}
