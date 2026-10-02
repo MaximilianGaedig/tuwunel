@@ -109,6 +109,14 @@ impl Kind {
 		}
 	}
 
+	/// The kind a name stands for: the inverse of [`Self::name`].
+	#[must_use]
+	pub fn from_name(name: &str) -> Option<Self> {
+		(1..=8)
+			.filter_map(Self::from_byte)
+			.find(|kind| kind.name() == name)
+	}
+
 	/// Whether this is a presence change rather than something done in a room.
 	#[must_use]
 	pub const fn is_presence(self) -> bool {
@@ -310,12 +318,27 @@ pub fn entries_rev<'a>(
 
 /// When a person is usually around, from their log between two times.
 /// `offset_ms` is the asker's distance from UTC, so the hours are theirs.
+///
+/// `kinds` narrows it to the rows of those kinds, and everything counted is
+/// then counted from them alone - the days the log covers included. What
+/// someone sent is known for years and their presence only since it was first
+/// kept, so the two answer different questions: when they write, and when
+/// they are there.
 #[implement(Service)]
-pub async fn week(&self, user_id: &UserId, from_ts: u64, to_ts: u64, offset_ms: i64) -> Week {
+pub async fn week(
+	&self,
+	user_id: &UserId,
+	from_ts: u64,
+	to_ts: u64,
+	offset_ms: i64,
+	kinds: Option<&[Kind]>,
+) -> Week {
 	let mut fold = WeekFold::new(offset_ms);
 	let mut entries = pin!(self.entries(user_id, from_ts, to_ts));
 	while let Some(entry) = entries.next().await {
-		fold.add(entry);
+		if is_wanted(kinds, entry.kind) {
+			fold.add(entry);
+		}
 	}
 
 	fold.finish(to_ts.min(millis_since_unix_epoch()))
@@ -370,6 +393,22 @@ fn kind_of_event(event_type: &TimelineEventType, is_state: bool) -> Option<Kind>
 		| TimelineEventType::Reaction => Some(Kind::Reaction),
 		| _ => Some(Kind::Sent),
 	}
+}
+
+/// Whether a row of this kind is one of those asked for; all are when none were named.
+fn is_wanted(kinds: Option<&[Kind]>, kind: Kind) -> bool {
+	kinds.is_none_or(|kinds| kinds.contains(&kind))
+}
+
+/// The kinds a comma-separated list names. A name that is not a kind is an
+/// error rather than ignored: a filter that silently matched nothing would
+/// read as "they are never around".
+pub fn kinds_named(list: &str) -> Result<Vec<Kind>, String> {
+	list.split(',')
+		.map(str::trim)
+		.filter(|name| !name.is_empty())
+		.map(|name| Kind::from_name(name).ok_or_else(|| name.to_owned()))
+		.collect()
 }
 
 /// Whether a last-active time can be one: not after now, give or take a clock.
@@ -533,6 +572,65 @@ mod tests {
 			fold.add(Entry { ts, kind, value: 0 });
 		}
 		fold.finish(now)
+	}
+
+	fn fold_only(entries: &[(u64, Kind)], kinds: &[Kind], now: u64) -> super::Week {
+		let mut fold = WeekFold::new(0);
+		for &(ts, kind) in entries {
+			if super::is_wanted(Some(kinds), kind) {
+				fold.add(Entry { ts, kind, value: 0 });
+			}
+		}
+		fold.finish(now)
+	}
+
+	#[test]
+	fn every_kind_has_a_name_that_names_it() {
+		for kind in (1..=8).filter_map(Kind::from_byte) {
+			assert_eq!(Kind::from_name(kind.name()), Some(kind));
+		}
+		assert_eq!(Kind::from_name("presence"), None);
+	}
+
+	#[test]
+	fn a_list_of_kinds_is_read_and_a_wrong_name_is_refused() {
+		assert_eq!(super::kinds_named("sent, reaction"), Ok(vec![Kind::Sent, Kind::Reaction]));
+		assert_eq!(super::kinds_named("online,,seen"), Ok(vec![Kind::Online, Kind::Seen]));
+		assert_eq!(super::kinds_named("sent,messages"), Err("messages".to_owned()));
+		assert_eq!(super::kinds_named(""), Ok(Vec::new()));
+	}
+
+	// Years of messages and four days of presence in one grid said "usually around" of hours they
+	// had only ever written in. Asked for one or the other, each is counted from its own rows:
+	// the hours, and the days those hours are out of.
+	#[test]
+	fn a_week_of_some_kinds_counts_only_those_rows_and_their_days() {
+		let hour = 3_600_000;
+		let entries = [
+			// A message three weeks ago, Monday 09:xx.
+			(MONDAY + 9 * hour, Kind::Sent),
+			// Online on the Monday three weeks later, 20:00 to 21:30.
+			(MONDAY + 21 * DAY_MS + 20 * hour, Kind::Online),
+			(MONDAY + 21 * DAY_MS + 21 * hour + hour / 2, Kind::Offline),
+		];
+		let now = MONDAY + 22 * DAY_MS;
+
+		let all = fold(&entries, 0, now);
+		assert_eq!(all.seen[0][9], 1);
+		assert_eq!(all.seen[0][20], 1);
+		assert_eq!(all.days[0], 4, "four Mondays from the first row to now");
+
+		let presence = fold_only(&entries, &[Kind::Online, Kind::Unavailable, Kind::Offline], now);
+		assert_eq!(presence.seen[0][9], 0, "the message is not presence");
+		assert_eq!(presence.seen[0][20], 1);
+		assert_eq!(presence.seen[0][21], 1);
+		assert_eq!(presence.days[0], 1, "presence is only known for the last Monday");
+		assert_eq!(presence.entries, 2);
+
+		let messages = fold_only(&entries, &[Kind::Sent, Kind::Reaction], now);
+		assert_eq!(messages.seen[0][9], 1);
+		assert_eq!(messages.seen[0][20], 0, "being online is not writing");
+		assert_eq!(messages.entries, 1);
 	}
 
 	#[test]

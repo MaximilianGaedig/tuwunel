@@ -15,10 +15,10 @@ use ruma::{
 };
 use serde::{Deserialize, Serialize};
 use tuwunel_core::{
-	Err, Result,
+	Err, Result, err,
 	utils::{math::usize_from_ruma_bounded, millis_since_unix_epoch},
 };
-use tuwunel_service::activity_log::Week;
+use tuwunel_service::activity_log::{Week, kinds_named};
 
 use crate::Ruma;
 
@@ -57,6 +57,11 @@ pub struct Request {
 	/// For `week`: the asker's distance from UTC in minutes, so the hours are theirs.
 	#[ruma_api(query)]
 	pub utc_offset_minutes: Option<Int>,
+
+	/// For `week`: the kinds of row to count, comma-separated (`online,unavailable,offline,seen`
+	/// for presence, `sent,reaction` for what they wrote); every kind by default.
+	#[ruma_api(query)]
+	pub kinds: Option<String>,
 }
 
 #[response]
@@ -156,9 +161,15 @@ pub(crate) async fn get_user_activity_route(
 			.utc_offset_minutes
 			.map_or(0, i64::from)
 			.saturating_mul(60_000);
+		let kinds = body
+			.kinds
+			.as_deref()
+			.map(kinds_named)
+			.transpose()
+			.map_err(|name| err!(Request(InvalidParam("{name} is not a kind of activity."))))?;
 		let week = services
 			.activity_log
-			.week(user_id, from_ts, to_ts, offset_ms)
+			.week(user_id, from_ts, to_ts, offset_ms, kinds.as_deref())
 			.await;
 
 		return Ok(Response {

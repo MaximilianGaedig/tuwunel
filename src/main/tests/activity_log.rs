@@ -207,6 +207,27 @@ async fn activity(services: &Services, base: &str) -> Result {
 	);
 	assert_eq!(week["entries"].as_u64(), u64::try_from(rows.len()).ok(), "{answer}");
 
+	// Asked for what she wrote only, the week is counted from those rows and no others.
+	let written = rows
+		.iter()
+		.filter(|row| matches!(row["kind"].as_str(), Some("sent" | "reaction")))
+		.count();
+	assert!(written > 0 && written < rows.len(), "{log}");
+	let only = format!("{query}&kinds=sent,reaction");
+	let (status, narrowed) = get(&alice, log_url(base, &alice_id, &only)).await?;
+	assert_eq!(status, 200, "{narrowed}");
+	assert_eq!(
+		narrowed["week"]["entries"].as_u64(),
+		u64::try_from(written).ok(),
+		"{narrowed}"
+	);
+
+	// A name that is no kind is refused, not read as "nothing matches".
+	let wrong = format!("{query}&kinds=sent,messages");
+	let (status, refused) = get(&alice, log_url(base, &alice_id, &wrong)).await?;
+	assert_eq!(status, 400, "{refused}");
+	assert_eq!(refused["errcode"], "M_INVALID_PARAM", "{refused}");
+
 	let mut marked = BTreeSet::new();
 	for (weekday, day) in grid.iter().enumerate() {
 		for (hour, count) in day.as_array().into_iter().flatten().enumerate() {
