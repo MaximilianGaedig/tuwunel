@@ -51,5 +51,12 @@ pub(crate) async fn put_user_seen_route(
 		return Err!(Request(InvalidParam("`ts` is not a time in the past.")));
 	}
 
+	// The log keeps every sighting; presence shows the latest one to clients
+	// as when the person was last active.
+	services
+		.presence
+		.note_seen(&body.user_id, body.ts.into())
+		.await;
+
 	Ok(Response {})
 }

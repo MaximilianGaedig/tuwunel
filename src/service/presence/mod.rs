@@ -193,6 +193,16 @@ impl Service {
 			.await
 	}
 
+	/// Lets a network's "last seen" count as when the person was last active,
+	/// for someone who is not around. Returns whether presence changed.
+	pub async fn note_seen(&self, user_id: &UserId, ts: u64) -> bool {
+		if !self.services.server.config.allow_local_presence || self.services.db.is_read_only() {
+			return false;
+		}
+
+		self.db.note_seen(user_id, ts).await.is_some()
+	}
+
 	/// Removes the presence record for the given user from the database.
 	///
 	/// TODO: Why is this not used?

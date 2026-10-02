@@ -131,6 +131,48 @@ impl Data {
 		Ok(Some(*count))
 	}
 
+	/// Moves the time a person was last active forward to when their network
+	/// saw them.
+	///
+	/// A bridge learns "last seen at 14:05" about someone who is not around.
+	/// Presence has no word for that other than how long ago they were active,
+	/// so that is where it goes: clients then show it as they show anyone's
+	/// last activity. The state stays what it was, offline for someone presence
+	/// never heard of, and nothing is written to the activity log, which has
+	/// its own row for this.
+	pub(super) async fn note_seen(&self, user_id: &UserId, ts: u64) -> Option<u64> {
+		let last = self.get_presence_raw(user_id).await.ok();
+		if !seen_moves_last_active(last.as_ref().map(|(_, presence)| presence), ts) {
+			return None;
+		}
+
+		let (state, status_msg) = match &last {
+			| Some((_, presence)) => (presence.state.clone(), presence.status_msg.clone()),
+			| None => (PresenceState::Offline, None),
+		};
+
+		let presence = Presence {
+			state,
+			currently_active: false,
+			last_active_ts: ts,
+			status_msg,
+		};
+
+		let count = self.services.globals.next_count();
+		let key = presenceid_key(*count, user_id);
+
+		self.userid_presenceid.raw_put(user_id, *count);
+		self.presenceid_presence
+			.raw_put(key, Json(presence));
+
+		if let Some((last_count, _)) = last {
+			let key = presenceid_key(last_count, user_id);
+			self.presenceid_presence.remove(&key);
+		}
+
+		Some(*count)
+	}
+
 	#[inline]
 	pub(super) async fn remove_presence(&self, user_id: &UserId) {
 		let Ok(count) = self
@@ -408,5 +450,52 @@ mod tests {
 		assert_eq!(everything(db).await.len(), users.len(), "the old row is gone");
 
 		Ok(())
+	}
+}
+
+/// Whether a network's "last seen" is news to presence: the person is not
+/// around right now, and the time is later than the one held.
+fn seen_moves_last_active(held: Option<&Presence>, ts: u64) -> bool {
+	match held {
+		| None => true,
+		| Some(presence) =>
+			presence.state != PresenceState::Online
+				&& !presence.currently_active
+				&& ts > presence.last_active_ts,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use ruma::presence::PresenceState;
+
+	use super::seen_moves_last_active;
+	use crate::presence::Presence;
+
+	fn held(state: PresenceState, currently_active: bool, last_active_ts: u64) -> Presence {
+		Presence {
+			state,
+			currently_active,
+			last_active_ts,
+			status_msg: None,
+		}
+	}
+
+	#[test]
+	fn a_network_s_last_seen_moves_last_active_only_forward_and_only_for_the_absent() {
+		assert!(seen_moves_last_active(None, 1000), "someone presence never heard of");
+
+		let offline = held(PresenceState::Offline, false, 1000);
+		assert!(seen_moves_last_active(Some(&offline), 1001));
+		assert!(!seen_moves_last_active(Some(&offline), 1000), "the time already held");
+		assert!(!seen_moves_last_active(Some(&offline), 999), "an older sighting");
+
+		let away = held(PresenceState::Unavailable, false, 1000);
+		assert!(seen_moves_last_active(Some(&away), 2000));
+
+		let online = held(PresenceState::Online, true, 1000);
+		assert!(!seen_moves_last_active(Some(&online), 2000), "someone who is here now");
+		let active = held(PresenceState::Unavailable, true, 1000);
+		assert!(!seen_moves_last_active(Some(&active), 2000));
 	}
 }
