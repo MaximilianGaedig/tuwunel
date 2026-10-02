@@ -466,7 +466,7 @@ fn seen_moves_last_active(held: Option<&Presence>, ts: u64) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+mod seen_tests {
 	use ruma::presence::PresenceState;
 
 	use super::seen_moves_last_active;
