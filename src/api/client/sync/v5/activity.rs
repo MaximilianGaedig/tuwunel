@@ -14,7 +14,7 @@ use std::{
 	sync::{LazyLock, Mutex},
 };
 
-use futures::{StreamExt, TryStreamExt, future::ready};
+use futures::{StreamExt, TryStreamExt, future::ready, pin_mut};
 use ruma::{
 	OwnedRoomId, OwnedUserId, RoomId, UInt, UserId,
 	events::TimelineEventType::{
@@ -84,14 +84,20 @@ pub(super) async fn last_said(
 		.flatten();
 	let ts = match said {
 		| Some(ts) => ts.into(),
-		| None => services
-			.timeline
-			.pdus_rev(Some(sender_user), room_id, Some(last.saturating_add(1)))
-			.try_next()
-			.await
-			.ok()
-			.flatten()
-			.map_or(0, |(_, pdu)| pdu.origin_server_ts().get().into()),
+		| None => {
+			let newest = services.timeline.pdus_rev(
+				Some(sender_user),
+				room_id,
+				Some(last.saturating_add(1)),
+			);
+			pin_mut!(newest);
+			newest
+				.try_next()
+				.await
+				.ok()
+				.flatten()
+				.map_or(0, |(_, pdu)| pdu.origin_server_ts().get().into())
+		},
 	};
 
 	KNOWN
