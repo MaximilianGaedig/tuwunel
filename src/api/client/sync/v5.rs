@@ -1,3 +1,4 @@
+mod activity;
 mod extensions;
 mod filter;
 mod range;
@@ -64,6 +65,9 @@ struct WindowRoom {
 	lists: ListIds,
 	event_count: u64,
 	payload_count: u64,
+	/// When something was last said in the room, which the list is ordered by
+	/// (see `activity`): `u64::MAX` for an invite, so it is on top.
+	said_at: u64,
 }
 
 impl WindowRoom {

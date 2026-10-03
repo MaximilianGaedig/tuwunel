@@ -24,6 +24,7 @@ use tuwunel_service::{sync::Connection, users::InviteFilter};
 use super::{
 	super::invite_permitted_room,
 	ListIds, ResponseLists, SyncInfo, Window, WindowRoom,
+	activity::last_said,
 	filter::{filter_room, filter_room_meta},
 };
 
@@ -214,12 +215,22 @@ async fn matcher(
 				|| last_membership.failed,
 		});
 
+	let said_at = match membership {
+		| Some(MembershipState::Invite | MembershipState::Knock) => u64::MAX,
+		| _ => match last_timeline.count {
+			| Some(last) =>
+				last_said(services, sender_user, &room_id, PduCount::Normal(last)).await,
+			| None => 0,
+		},
+	};
+
 	Some(WindowRoom {
 		room_id,
 		membership,
 		lists,
 		event_count,
 		payload_count,
+		said_at,
 	})
 }
 
@@ -462,8 +473,9 @@ where
 }
 
 fn room_sort(a: &WindowRoom, b: &WindowRoom) -> Ordering {
-	b.event_count
-		.cmp(&a.event_count)
+	b.said_at
+		.cmp(&a.said_at)
+		.then_with(|| b.event_count.cmp(&a.event_count))
 		.then_with(|| a.room_id.cmp(&b.room_id))
 }
 
@@ -623,6 +635,22 @@ mod tests {
 			lists: ListIds::new(),
 			event_count,
 			payload_count,
+			said_at: event_count,
 		}
+	}
+
+	// A reaction, a rename or a bridge's backfill puts a room's newest event after
+	// another room's newest message without anything having been said in it since.
+	#[test]
+	fn rooms_are_ordered_by_when_something_was_said() {
+		let mut quiet = room(room_id!("!quiet:example.com").to_owned(), 90, 90, None);
+		quiet.said_at = 1_000;
+		let mut talked = room(room_id!("!talked:example.com").to_owned(), 50, 50, None);
+		talked.said_at = 2_000;
+
+		let mut rooms = [quiet, talked];
+		rooms.sort_by(room_sort);
+
+		assert_eq!(rooms[0].room_id, room_id!("!talked:example.com"));
 	}
 }
