@@ -136,10 +136,11 @@ pub(super) async fn handle_room(
 
 	let limited = room_timeline_limited(timeline_limit, limited);
 
+	// Signed: history a bridge imported is counted below 0, and as unsigned its
+	// token was a number paginating could not read back.
 	let prev_batch = timeline_pdus
 		.first()
 		.map(at!(0))
-		.map(PduCount::into_unsigned)
 		.as_ref()
 		.map(ToString::to_string);
 

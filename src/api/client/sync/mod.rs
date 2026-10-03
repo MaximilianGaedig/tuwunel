@@ -165,6 +165,7 @@ async fn load_timeline_with_errors(
 	errors: TimelineErrors,
 ) -> Result<(Vec<(PduCount, PduEvent)>, bool, PduCount), Error> {
 	let until = next_batch.map(|count| count.saturating_add(1));
+	let roomsincecount = since_floor(roomsincecount);
 	let pdus = services
 		.timeline
 		.pdus_rev(Some(sender_user), room_id, until);
@@ -207,6 +208,19 @@ async fn load_timeline_with_errors(
 	timeline_pdus.reverse();
 
 	Ok((timeline_pdus, limited, last_timeline_count))
+}
+
+/// Where a room's timeline stops going back. Nothing sent yet (0) means
+/// everything: history a bridge imported is counted below 0, and stopping
+/// at 0 cut it off without saying the timeline was limited - so the client
+/// had no token for it and showed the room's newest messages as its whole
+/// history.
+fn since_floor(roomsincecount: PduCount) -> PduCount {
+	if roomsincecount == PduCount::Normal(0) {
+		PduCount::min()
+	} else {
+		roomsincecount
+	}
 }
 
 /// Returns the backward pagination token for a timeline slice.
@@ -345,4 +359,21 @@ fn strip_prev_state(
 	}
 
 	pdu
+}
+
+#[cfg(test)]
+mod since_floor_tests {
+	use tuwunel_core::matrix::PduCount;
+
+	use super::since_floor;
+
+	#[test]
+	fn nothing_sent_yet_reaches_imported_history() {
+		assert!(since_floor(PduCount::Normal(0)) < PduCount::Backfilled(-1));
+	}
+
+	#[test]
+	fn a_position_is_kept() {
+		assert_eq!(since_floor(PduCount::Normal(7)), PduCount::Normal(7));
+	}
 }
