@@ -119,7 +119,7 @@ async fn reset_and_refresh_badge(
 
 #[cfg(test)]
 mod tests {
-	use ruma::{CanonicalJsonValue, MilliSecondsSinceUnixEpoch, uint};
+	use ruma::{CanonicalJsonValue, MilliSecondsSinceUnixEpoch, UInt};
 	use serde_json::json;
 
 	use super::read_receipt_ts;
@@ -130,8 +130,8 @@ mod tests {
 
 	#[test]
 	fn a_bridge_says_when_a_replayed_receipt_was_earned() {
-		let now = MilliSecondsSinceUnixEpoch(uint!(1_790_000_000_000));
-		let then = MilliSecondsSinceUnixEpoch(uint!(1_780_000_000_000));
+		let now = MilliSecondsSinceUnixEpoch(UInt::new(1_790_000_000_000).expect("in range"));
+		let then = MilliSecondsSinceUnixEpoch(UInt::new(1_780_000_000_000).expect("in range"));
 		let replayed = body(json!({
 			"m.read": "$event",
 			"com.beeper.read.extra": { "ts": 1_780_000_000_000_u64 },
@@ -147,7 +147,7 @@ mod tests {
 
 	#[test]
 	fn a_receipt_without_a_believable_time_was_earned_now() {
-		let now = MilliSecondsSinceUnixEpoch(uint!(1_790_000_000_000));
+		let now = MilliSecondsSinceUnixEpoch(UInt::new(1_790_000_000_000).expect("in range"));
 
 		for value in [
 			json!({ "m.read": "$event" }),
