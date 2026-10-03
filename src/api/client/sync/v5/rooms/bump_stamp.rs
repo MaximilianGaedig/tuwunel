@@ -37,14 +37,16 @@ pub(super) async fn room_bump_stamp(
 		return Ok(None);
 	}
 
+	// The bump is when the newest message was sent, not where it sits in the stream: a bridge
+	// appending a chat's old history puts years-old messages at its end, and with their position the
+	// chat would jump above everything said today. As a time, clients can also set it against the
+	// timestamps they sort the rooms they know more about by.
 	let bumpable_pdus = services
 		.timeline
 		.pdus_rev(Some(sender_user), room_id, Some(next_batch.saturating_add(1)))
 		.ready_try_take_while(|&(pdu_count, _)| Ok(pdu_count > roomsince))
-		.ready_try_filter_map(|(pdu_count, pdu)| {
-			Ok(is_bumpable_pdu(&pdu, sender_user)
-				.then(|| pdu_count.into_signed().try_into().ok())
-				.flatten())
+		.ready_try_filter_map(|(_, pdu)| {
+			Ok(is_bumpable_pdu(&pdu, sender_user).then(|| pdu.origin_server_ts().get()))
 		});
 
 	pin_mut!(bumpable_pdus);
@@ -56,10 +58,17 @@ fn is_bumpable_pdu(pdu: &PduEvent, sender_user: &UserId) -> bool {
 		return false;
 	}
 
+	// Being invited is news; joining is not: a bridge joins the user to a portal for a chat that
+	// may not have been written in for years, and it is the chat's messages that say when it was.
 	if *pdu.event_type() == TimelineEventType::RoomMember {
 		return pdu
 			.state_key()
-			.is_some_and(is_equal_to!(sender_user.as_str()));
+			.is_some_and(is_equal_to!(sender_user.as_str()))
+			&& pdu
+				.get_content_as_value()
+				.get("membership")
+				.and_then(|membership| membership.as_str())
+				== Some("invite");
 	}
 
 	DEFAULT_BUMP_TYPES
@@ -78,7 +87,7 @@ fn _is_sorted() {
 #[cfg(test)]
 mod tests {
 	use ruma::{
-		CanonicalJsonObject, event_id, events::TimelineEventType, room_id, serde::Raw, uint,
+		event_id, events::TimelineEventType, room_id, serde::Raw, uint,
 		user_id,
 	};
 	use serde_json::{json, value::to_raw_value};
@@ -87,6 +96,15 @@ mod tests {
 	use super::{DEFAULT_BUMP_TYPES, is_bumpable_pdu};
 
 	fn pdu(kind: TimelineEventType, state_key: Option<StateKey>, redacted: bool) -> PduEvent {
+		pdu_with(kind, state_key, redacted, json!({}))
+	}
+
+	fn pdu_with(
+		kind: TimelineEventType,
+		state_key: Option<StateKey>,
+		redacted: bool,
+		content: serde_json::Value,
+	) -> PduEvent {
 		let unsigned = redacted.then(|| {
 			to_raw_value(&json!({ "redacted_because": {} }))
 				.expect("valid unsigned")
@@ -95,9 +113,7 @@ mod tests {
 
 		PduEvent {
 			kind,
-			content: Raw::from_json(
-				to_raw_value(&CanonicalJsonObject::new()).expect("valid content"),
-			),
+			content: Raw::from_json(to_raw_value(&content).expect("valid content")),
 			event_id: event_id!("$event:example.com").to_owned(),
 			room_id: room_id!("!room:example.com").to_owned(),
 			sender: user_id!("@alice:example.com").to_owned(),
@@ -136,11 +152,30 @@ mod tests {
 	}
 
 	#[test]
-	fn own_membership_bumps() {
+	fn own_invite_bumps() {
 		let sender = user_id!("@alice:example.com");
-		let pdu = pdu(TimelineEventType::RoomMember, Some(sender.as_str().into()), false);
+		let pdu = pdu_with(
+			TimelineEventType::RoomMember,
+			Some(sender.as_str().into()),
+			false,
+			json!({ "membership": "invite" }),
+		);
 
 		assert!(is_bumpable_pdu(&pdu, sender));
+	}
+
+	// A bridge joining the user to a portal for an old chat is not news.
+	#[test]
+	fn own_join_does_not_bump() {
+		let sender = user_id!("@alice:example.com");
+		let pdu = pdu_with(
+			TimelineEventType::RoomMember,
+			Some(sender.as_str().into()),
+			false,
+			json!({ "membership": "join" }),
+		);
+
+		assert!(!is_bumpable_pdu(&pdu, sender));
 	}
 
 	#[test]
