@@ -334,6 +334,7 @@ mod tests {
 			lists: ListIds::new(),
 			event_count: 0,
 			payload_count,
+			said_at: 0,
 		};
 
 		[(room_id.to_owned(), room)].into()
