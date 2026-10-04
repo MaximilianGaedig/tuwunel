@@ -136,8 +136,12 @@ pub(super) fn apply_ranges(
 		.enabled
 		.unwrap_or(false)
 	{
-		extensions.response.account_data.rooms =
-			collect_account_data_ranges(conn, window, ranges);
+		// Rooms outside the response keep what `collect` found for them.
+		extensions
+			.response
+			.account_data
+			.rooms
+			.extend(collect_account_data_ranges(conn, window, ranges));
 	}
 }
 
