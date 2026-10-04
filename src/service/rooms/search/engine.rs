@@ -40,7 +40,7 @@ use tantivy::{
 	collector::{Count, TopDocs},
 	directory::MmapDirectory,
 	doc,
-	query::{BooleanQuery, FuzzyTermQuery, Occur, Query, TermQuery},
+	query::{BooleanQuery, FuzzyTermQuery, Occur, Query, TermQuery, TermSetQuery},
 	schema::{
 		FAST, Field, INDEXED, IndexRecordOption, STORED, Schema, TextFieldIndexing, TextOptions,
 		Value,
@@ -75,7 +75,9 @@ struct Fields {
 	body: Field,
 	/// The packed PDU key, given back as the result.
 	pdu: Field,
-	/// The room's own ordering (`PduCount::into_signed`), so results can come back newest first.
+	/// Where the message sits in the server's timeline (`PduCount::into_signed`), so results can
+	/// come back newest first. The count is one server-wide counter, so this orders messages of
+	/// different rooms against each other as well: by when the server took them in.
 	order: Field,
 }
 
@@ -249,21 +251,27 @@ impl Engine {
 		Ok(())
 	}
 
-	/// The messages of one room matching `term`, newest first, and how many there are in total.
+	/// The messages of any of `rooms` matching `term`, newest first across all of them, and how
+	/// many there are in total.
 	///
 	/// `skip` and `want` are the page; `count` is every match, which is what lets a client say which
-	/// of how many it is showing. Ordering is the room's own order rather than relevance, because
-	/// searching inside one conversation is a way of moving around it - the same reason other chat
-	/// apps give you arrows rather than a ranked list.
+	/// of how many it is showing. Ordering is recency rather than relevance, because searching inside
+	/// one conversation is a way of moving around it - the same reason other chat apps give you
+	/// arrows rather than a ranked list.
+	///
+	/// Several rooms are one query over the whole set rather than one per room: the page, the offset
+	/// and the count are then the search's, not each room's, and a search of every room a user is in
+	/// costs one walk of the index instead of one per room. The forgiving second pass is decided for
+	/// the set as a whole, as it is for one room.
 	pub(super) fn search(
 		&self,
-		room: ShortRoomId,
+		rooms: &[ShortRoomId],
 		term: &str,
 		skip: usize,
 		want: usize,
 	) -> Result<Found> {
 		let searcher = self.reader.searcher();
-		let Some(query) = self.query(room, term, false) else {
+		let Some(query) = self.query(rooms, term, false) else {
 			return Ok(Found { count: 0, pdus: Vec::new() });
 		};
 
@@ -282,7 +290,7 @@ impl Engine {
 		let query = if count > 0 {
 			query
 		} else {
-			let Some(forgiving) = self.query(room, term, true) else {
+			let Some(forgiving) = self.query(rooms, term, true) else {
 				return Ok(Found { count: 0, pdus: Vec::new() });
 			};
 			count = searcher
@@ -315,8 +323,8 @@ impl Engine {
 		Ok(Found { count, pdus })
 	}
 
-	/// The query for one search term: every word must match, as a prefix, optionally forgiving one
-	/// typo.
+	/// The query for one search term inside `rooms`: every word must match, as a prefix, optionally
+	/// forgiving one typo. No rooms is no query.
 	///
 	/// A word always matches as a prefix, so searching as the user types works ("phot" finding
 	/// "photos"). Tolerance is the caller's choice, and being conservative about it matters here:
@@ -328,14 +336,20 @@ impl Engine {
 	/// `thats`, `things` and even `the`, and `thanks` claim 16594 hits. One edit, and that noise is
 	/// gone. Telegram draws the same line - its in-chat search is exact and chronological, and the
 	/// forgiving search is the global one.
-	fn query(&self, room: ShortRoomId, term: &str, forgiving: bool) -> Option<Box<dyn Query>> {
-		let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(
-			Occur::Must,
-			Box::new(TermQuery::new(
-				Term::from_field_u64(self.fields.room, u64::from(room)),
-				IndexRecordOption::Basic,
-			)),
-		)];
+	fn query(
+		&self,
+		rooms: &[ShortRoomId],
+		term: &str,
+		forgiving: bool,
+	) -> Option<Box<dyn Query>> {
+		let room_term =
+			|room: &ShortRoomId| Term::from_field_u64(self.fields.room, u64::from(*room));
+		let in_rooms: Box<dyn Query> = match rooms {
+			| [] => return None,
+			| [room] => Box::new(TermQuery::new(room_term(room), IndexRecordOption::Basic)),
+			| rooms => Box::new(TermSetQuery::new(rooms.iter().map(room_term))),
+		};
+		let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, in_rooms)];
 
 		let mut words: usize = 0;
 		for word in tokenize(term) {
@@ -361,4 +375,123 @@ fn tokenize(body: &str) -> impl Iterator<Item = String> + Send + '_ {
 	body.split_terminator(|c: char| !c.is_alphanumeric())
 		.filter(|word| !word.is_empty() && word.len() <= WORD_MAX_LEN)
 		.map(str::to_lowercase)
+}
+
+#[cfg(test)]
+mod tests {
+	use std::{env::temp_dir, fs::remove_dir_all, path::PathBuf};
+
+	use tuwunel_core::{Result, utils::random_string};
+
+	use super::{Engine, Found};
+
+	/// An index in a directory of its own, removed when the test is done with it.
+	struct Scratch {
+		engine: Engine,
+		path: PathBuf,
+	}
+
+	impl Drop for Scratch {
+		fn drop(&mut self) { remove_dir_all(&self.path).ok(); }
+	}
+
+	/// Indexes `(room, order, body)` and makes it searchable straight away. The order doubles as
+	/// the stored key, so a result says which message it was.
+	fn index(messages: &[(u64, i64, &str)]) -> Result<Scratch> {
+		let path = temp_dir()
+			.join("tuwunel-search-engine")
+			.join(random_string(16));
+		let engine = Engine::open(&path)?;
+		for &(room, order, body) in messages {
+			engine.add(room, &order.to_be_bytes(), order, body)?;
+		}
+		engine.commit()?;
+		engine
+			.reader
+			.reload()
+			.map_err(|e| tuwunel_core::err!("{e}"))?;
+
+		Ok(Scratch { engine, path })
+	}
+
+	/// The orders of what a search found, in the order it gave them.
+	fn orders(found: &Found) -> Vec<i64> {
+		found
+			.pdus
+			.iter()
+			.map(|pdu| i64::from_be_bytes(pdu.as_slice().try_into().expect("an order")))
+			.collect()
+	}
+
+	/// Two busy rooms whose messages alternate, and a third the search is not asked about. Room 1
+	/// ends with a backfilled message, which the server counts below zero.
+	const ROOMS: &[(u64, i64, &str)] = &[
+		(1, -3, "hello from history"),
+		(1, 1, "hello one"),
+		(2, 2, "hello two"),
+		(1, 3, "hello three"),
+		(2, 4, "hello four"),
+		(3, 5, "hello elsewhere"),
+		(1, 6, "hello six"),
+		(2, 7, "hello seven"),
+		(2, 8, "goodbye"),
+	];
+
+	// The bug was a search of all rooms returning `limit` results per room, grouped by room: with
+	// a couple of hundred rooms a page of 10 was thousands of results. The page is the search's.
+	#[test]
+	fn a_page_of_several_rooms_is_one_page_newest_first_across_them() -> Result {
+		let scratch = index(ROOMS)?;
+
+		let found = scratch.engine.search(&[1, 2], "hello", 0, 3)?;
+		assert_eq!(orders(&found), [7, 6, 4], "not the newest three across both rooms");
+		assert_eq!(found.count, 7, "the count is not every match in both rooms");
+
+		Ok(())
+	}
+
+	// The offset is into the whole result, so stepping through it page by page sees every match
+	// once, in one order, and nothing from a room that was not asked about.
+	#[test]
+	fn paging_several_rooms_walks_one_list_without_repeats() -> Result {
+		let scratch = index(ROOMS)?;
+
+		let mut seen = Vec::new();
+		for skip in (0..10).step_by(3) {
+			seen.extend(orders(&scratch.engine.search(&[1, 2], "hello", skip, 3)?));
+		}
+		assert_eq!(seen, [7, 6, 4, 3, 2, 1, -3]);
+
+		Ok(())
+	}
+
+	// One room stays what it was: only its own messages, newest first.
+	#[test]
+	fn one_room_finds_only_its_own_messages() -> Result {
+		let scratch = index(ROOMS)?;
+
+		let found = scratch.engine.search(&[2], "hello", 0, 10)?;
+		assert_eq!(orders(&found), [7, 4, 2]);
+		assert_eq!(found.count, 3);
+
+		let found = scratch.engine.search(&[], "hello", 0, 10)?;
+		assert_eq!((found.count, found.pdus.len()), (0, 0), "no rooms found something");
+
+		Ok(())
+	}
+
+	// A typo is forgiven only when nothing matched as typed, and that is decided for the whole set:
+	// an exact match in one room keeps the near misses of another out of the page.
+	#[test]
+	fn a_typo_is_forgiven_only_when_no_room_matched_as_typed() -> Result {
+		let scratch = index(&[(1, 1, "hallo there"), (2, 2, "hello there"), (2, 3, "help")])?;
+
+		let found = scratch.engine.search(&[1, 2], "hello", 0, 10)?;
+		assert_eq!(orders(&found), [2], "an exact match was diluted by a forgiven one");
+
+		let found = scratch.engine.search(&[1, 2], "helo", 0, 10)?;
+		assert_eq!(orders(&found), [3, 2], "nothing exact, yet one edit was not forgiven");
+
+		Ok(())
+	}
 }
