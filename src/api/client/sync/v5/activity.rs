@@ -49,13 +49,43 @@ pub(super) async fn newest_said(
 		.pdus_rev(Some(sender_user), room_id, Some(until.saturating_add(1)))
 		.ready_try_take_while(|&(pdu_count, _)| Ok(pdu_count > since))
 		.take(SCAN)
-		.ready_try_filter_map(|(_, pdu)| {
-			Ok(is_bumpable_pdu(&pdu, sender_user).then(|| pdu.origin_server_ts().get()))
-		})
-		.try_fold(None, |newest: Option<UInt>, ts| {
-			ready(Ok(Some(newest.map_or(ts, |n| n.max(ts)))))
-		})
+		.try_fold(Said::default(), |said, (_, pdu)| ready(Ok(said.with(&pdu, sender_user))))
 		.await
+		.map(|said| said.newest)
+}
+
+/// What `newest_said` has found so far, going back from the newest event.
+#[derive(Clone, Copy, Debug, Default)]
+struct Said {
+	newest: Option<UInt>,
+	/// One of the user's own membership events has been passed.
+	own_membership_seen: bool,
+}
+
+impl Said {
+	/// Being invited is news only while it is still the user's membership: a
+	/// bridge invites the user to a portal and joins them to it at once, and that
+	/// invite dated the chat by when the portal was made rather than by its last
+	/// message.
+	fn with(self, pdu: &PduEvent, sender_user: &UserId) -> Self {
+		let own_membership = *pdu.event_type() == TimelineEventType::RoomMember
+			&& pdu
+				.state_key()
+				.is_some_and(is_equal_to!(sender_user.as_str()));
+
+		let answered = own_membership && self.own_membership_seen;
+		let counts = is_bumpable_pdu(pdu, sender_user) && !answered;
+		let newest = match (counts, self.newest) {
+			| (false, newest) => newest,
+			| (true, None) => Some(pdu.origin_server_ts().get()),
+			| (true, Some(newest)) => Some(newest.max(pdu.origin_server_ts().get())),
+		};
+
+		Self {
+			newest,
+			own_membership_seen: self.own_membership_seen || own_membership,
+		}
+	}
 }
 
 /// The room's newest message up to `until`, with its position, for a room list's preview: the event
@@ -184,7 +214,7 @@ mod tests {
 	use serde_json::{json, value::to_raw_value};
 	use tuwunel_core::matrix::{StateKey, pdu::PduEvent};
 
-	use super::{DEFAULT_BUMP_TYPES, is_bumpable_pdu, is_preview_pdu};
+	use super::{DEFAULT_BUMP_TYPES, Said, is_bumpable_pdu, is_preview_pdu};
 
 	fn pdu(kind: TimelineEventType, state_key: Option<StateKey>, redacted: bool) -> PduEvent {
 		pdu_with(kind, state_key, redacted, json!({}))
@@ -302,5 +332,56 @@ mod tests {
 		let pdu = pdu(TimelineEventType::RoomMessage, None, true);
 
 		assert!(!is_bumpable_pdu(&pdu, sender));
+	}
+
+	fn at(mut pdu: PduEvent, ts: u64) -> PduEvent {
+		pdu.origin_server_ts = ts.try_into().expect("fits");
+		pdu
+	}
+
+	fn newest_said(newest_first: &[PduEvent]) -> Option<u64> {
+		let sender = user_id!("@alice:example.com");
+
+		newest_first
+			.iter()
+			.fold(Said::default(), |said, pdu| said.with(pdu, sender))
+			.newest
+			.map(Into::into)
+	}
+
+	fn own_membership(membership: &str, ts: u64) -> PduEvent {
+		at(
+			pdu_with(
+				TimelineEventType::RoomMember,
+				Some("@alice:example.com".into()),
+				false,
+				json!({ "membership": membership }),
+			),
+			ts,
+		)
+	}
+
+	// A bridge makes a portal for an old chat: it invites and joins the user, then
+	// imports the chat's history, all dated by when it was said.
+	#[test]
+	fn an_invite_already_joined_does_not_date_the_room() {
+		let newest_first = [
+			at(pdu(TimelineEventType::from("im.mxg.settings"), Some("".into()), false), 300),
+			at(pdu(TimelineEventType::RoomMessage, None, false), 100),
+			own_membership("join", 210),
+			own_membership("invite", 200),
+		];
+
+		assert_eq!(newest_said(&newest_first), Some(100));
+	}
+
+	#[test]
+	fn a_pending_invite_dates_the_room() {
+		let newest_first = [
+			own_membership("invite", 200),
+			at(pdu(TimelineEventType::RoomMessage, None, false), 100),
+		];
+
+		assert_eq!(newest_said(&newest_first), Some(200));
 	}
 }
