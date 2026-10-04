@@ -652,6 +652,21 @@ default-features = false
 # https://github.com/girlbossceo/rustyline-async/commit/de26100b0db03e419a3d8e1dd26895d170d1fe50
 # adds event for CTRL+\:
 # https://github.com/girlbossceo/rustyline-async/commit/67d8c49aeac03a5ef4e818f663eaa94dd7bf339b
+# synapse-admin-api depends on matrix-construct's ruma; the one fork of it that has the
+# im.mxg.presence extension types has to be the only copy in the graph.
+[patch."https://github.com/matrix-construct/ruma"]
+ruma = { git = "https://github.com/MaximilianGaedig/ruma", rev = "b9e7a7451fb3c402b2dec8835e382e8fd1b38313" }
+ruma-appservice-api = { git = "https://github.com/MaximilianGaedig/ruma", rev = "b9e7a7451fb3c402b2dec8835e382e8fd1b38313" }
+ruma-client-api = { git = "https://github.com/MaximilianGaedig/ruma", rev = "b9e7a7451fb3c402b2dec8835e382e8fd1b38313" }
+ruma-common = { git = "https://github.com/MaximilianGaedig/ruma", rev = "b9e7a7451fb3c402b2dec8835e382e8fd1b38313" }
+ruma-events = { git = "https://github.com/MaximilianGaedig/ruma", rev = "b9e7a7451fb3c402b2dec8835e382e8fd1b38313" }
+ruma-federation-api = { git = "https://github.com/MaximilianGaedig/ruma", rev = "b9e7a7451fb3c402b2dec8835e382e8fd1b38313" }
+ruma-identifiers-validation = { git = "https://github.com/MaximilianGaedig/ruma", rev = "b9e7a7451fb3c402b2dec8835e382e8fd1b38313" }
+ruma-identity-service-api = { git = "https://github.com/MaximilianGaedig/ruma", rev = "b9e7a7451fb3c402b2dec8835e382e8fd1b38313" }
+ruma-macros = { git = "https://github.com/MaximilianGaedig/ruma", rev = "b9e7a7451fb3c402b2dec8835e382e8fd1b38313" }
+ruma-push-gateway-api = { git = "https://github.com/MaximilianGaedig/ruma", rev = "b9e7a7451fb3c402b2dec8835e382e8fd1b38313" }
+ruma-signatures = { git = "https://github.com/MaximilianGaedig/ruma", rev = "b9e7a7451fb3c402b2dec8835e382e8fd1b38313" }
+
 [patch.crates-io.rustyline-async]
 git = "https://github.com/matrix-construct/rustyline-async"
 rev = "879968ba99c2558ae234fd67a057b7ea6f761fd3"
