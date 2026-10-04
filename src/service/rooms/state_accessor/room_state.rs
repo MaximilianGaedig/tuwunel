@@ -72,6 +72,28 @@ pub fn room_state_full<'a>(
 		.try_flatten_stream()
 }
 
+/// Streams the type, state key and event ID of every entry in the room's
+/// current state.
+///
+/// Failure to resolve the current snapshot is yielded as an error. Entries
+/// whose short IDs cannot be resolved are skipped.
+#[implement(super::Service)]
+#[tracing::instrument(skip(self), level = "debug")]
+pub fn room_state_full_keys_with_ids<'a>(
+	&'a self,
+	room_id: &'a RoomId,
+) -> impl Stream<Item = Result<((StateEventType, StateKey), OwnedEventId)>> + Send + 'a {
+	self.services
+		.state
+		.get_room_shortstatehash(room_id)
+		.map_ok(|shortstatehash| {
+			self.state_full_keys_with_ids(shortstatehash)
+				.map(Ok)
+		})
+		.map_err(move |e| err!(Database("Missing state for {room_id:?}: {e:?}")))
+		.try_flatten_stream()
+}
+
 /// Streams every resolvable PDU in the room's current state.
 ///
 /// Failure to resolve the current snapshot is yielded as an error. Individual

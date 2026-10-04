@@ -607,6 +607,33 @@ async fn collect_required_state(
 				})
 		});
 
+	// MSC4186: a `*` event type selects the state of every type with the given
+	// state key (`*`: all of it, members included), as Synapse does. Without this,
+	// `["*", "*"]` matched no type and brought nothing.
+	let every_type_keys: SmallVec<[&str; 1]> = required_state
+		.iter()
+		.filter(|(event_type, _)| is_every_type(event_type))
+		.map(|(_, state_key)| state_key.as_str())
+		.collect();
+
+	let every_type_wanted =
+		!every_type_keys.is_empty() && (!state_unchanged || previous.is_some());
+
+	let every_type_state = every_type_wanted
+		.then(|| {
+			services
+				.state_accessor
+				.room_state_full_keys_with_ids(room_id)
+				.ready_filter_map(Result::ok)
+		})
+		.into_iter()
+		.stream()
+		.flatten()
+		.ready_filter_map(move |((event_type, state_key), event_id)| {
+			every_type_selects(&every_type_keys, sender_user, state_key.as_str())
+				.then_some(((event_type, state_key), Some(event_id), false))
+		});
+
 	let mut timeline_members: TimelineMembers<'_> = timeline_senders
 		.chain(timeline_member_targets)
 		.collect();
@@ -633,6 +660,7 @@ async fn collect_required_state(
 		.map(|state| (state, None, false))
 		.stream()
 		.chain(wildcard_state)
+		.chain(every_type_state)
 		.chain(
 			timeline_members
 				.map(|state| (state, None, true))
@@ -714,9 +742,31 @@ fn state_was_requested(
 	state_key: &str,
 	sender_user: &UserId,
 ) -> bool {
-	let contains = |key| previous.contains(&required_state_hash(event_type, key));
+	let every_type = StateEventType::from("*");
 
-	contains("*") || contains(state_key) || (state_key == sender_user.as_str() && contains("$ME"))
+	[event_type, &every_type]
+		.into_iter()
+		.any(|event_type| {
+			let contains = |key| previous.contains(&required_state_hash(event_type, key));
+
+			contains("*")
+				|| contains(state_key)
+				|| (state_key == sender_user.as_str() && contains("$ME"))
+		})
+}
+
+/// Whether a `required_state` entry's event type is the `*` wildcard.
+fn is_every_type(event_type: &StateEventType) -> bool { *event_type == StateEventType::from("*") }
+
+/// Whether a state key is selected by the state keys given with a `*` event
+/// type.
+fn every_type_selects(state_keys: &[&str], sender_user: &UserId, state_key: &str) -> bool {
+	state_keys.iter().any(|&wanted| match wanted {
+		| "*" => true,
+		| "$ME" => state_key == sender_user.as_str(),
+		| "$LAZY" => false,
+		| wanted => state_key == wanted,
+	})
 }
 
 fn state_is_required(

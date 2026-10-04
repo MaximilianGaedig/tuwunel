@@ -317,6 +317,33 @@ pub fn state_keys_with_shortids<'a>(
 		.flatten_stream()
 }
 
+/// Streams the type, state key and event ID of every entry in a snapshot.
+///
+/// Snapshot and reverse-mapping failures are skipped, so the stream is best
+/// effort.
+#[implement(super::Service)]
+pub fn state_full_keys_with_ids(
+	&self,
+	shortstatehash: ShortStateHash,
+) -> impl Stream<Item = ((StateEventType, StateKey), OwnedEventId)> + Send + '_ {
+	self.state_full_shortids(shortstatehash)
+		.ignore_err()
+		.unzip()
+		.map(|(shortstatekeys, shorteventids): (Vec<_>, Vec<_>)| {
+			let event_ids = self
+				.services
+				.short
+				.multi_get_eventid_from_short(shorteventids.into_iter().stream());
+
+			self.services
+				.short
+				.multi_get_statekey_from_short(shortstatekeys.into_iter().stream())
+				.zip(event_ids)
+				.ready_filter_map(|(key, event_id)| Some((key.ok()?, event_id.ok()?)))
+		})
+		.flatten_stream()
+}
+
 /// Streams state keys for one event type in a snapshot.
 ///
 /// Snapshot and short-state-key mapping failures are skipped, so the stream is
