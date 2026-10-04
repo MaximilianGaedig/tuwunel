@@ -226,3 +226,33 @@ jobs:
       - name: Disk space left
         if: ${{ !cancelled() }}
         run: df -h / /nix || true
+
+  # The deploy branch's binary as an image for la-casa, which deploys it by itself: a timer there pulls
+  # `latest`, and when it is new snapshots the database (hardlinks), swaps the container and keeps the old
+  # one to roll back to. The label keeps watchtower off the homeserver, so only that deploys it.
+  image:
+    name: image
+    needs: static
+    if: github.ref == 'refs/heads/feat/appservice-account-data'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: tuwunel-static-x86_64-${{ github.sha }}
+      - name: Build and push
+        env:
+          IMAGE: ghcr.io/maximiliangaedig/tuwunel-mxg
+        run: |
+          printf '%s\n' \
+            'FROM ghcr.io/matrix-construct/tuwunel:latest' \
+            'COPY --chmod=755 tuwunel /usr/bin/tuwunel' \
+            'LABEL com.centurylinklabs.watchtower.enable=false' > Dockerfile
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker build -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:latest" \
+            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" .
+          docker push "$IMAGE:${{ github.sha }}"
+          docker push "$IMAGE:latest"
