@@ -19,10 +19,13 @@
 use std::sync::Arc;
 
 use futures::{Stream, StreamExt};
-use ruma::UserId;
+use ruma::{MilliSecondsSinceUnixEpoch, UInt, UserId};
 use tuwunel_core::{
 	Result, err, implement,
-	matrix::pdu::{PduCount, PduId, RawPduId},
+	matrix::{
+		Event,
+		pdu::{PduCount, PduId, RawPduId},
+	},
 	utils::{ReadyExt, stream::TryIgnore},
 };
 use tuwunel_database::Map;
@@ -112,9 +115,10 @@ pub async fn put(
 	}
 
 	self.db.mediatext.insert(&key, text.as_bytes());
+	let sent = self.sent(pdu_id).await;
 	self.services
 		.search
-		.index_pdu(shortroomid, pdu_id, text);
+		.index_pdu(shortroomid, pdu_id, sent, text);
 
 	tuwunel_core::debug!(
 		"Indexed {} of {pdu_id:?} in room {shortroomid} ({} chars) for {by}",
@@ -200,9 +204,10 @@ pub async fn reindex_room(&self, shortroomid: ShortRoomId) -> usize {
 	for kind in KINDS {
 		let mut texts = std::pin::pin!(self.texts(shortroomid, kind));
 		while let Some((pdu_id, text)) = texts.next().await {
+			let sent = self.sent(&pdu_id).await;
 			self.services
 				.search
-				.index_pdu(shortroomid, &pdu_id, &text);
+				.index_pdu(shortroomid, &pdu_id, sent, &text);
 			indexed = indexed.saturating_add(1);
 		}
 	}
@@ -280,4 +285,16 @@ fn make_prefix(shortroomid: ShortRoomId, kind: TextKind) -> Vec<u8> {
 #[must_use]
 pub fn pdu_id_for(shortroomid: ShortRoomId, count: PduCount) -> RawPduId {
 	PduId { shortroomid, count }.into()
+}
+
+/// When the event a piece of media text belongs to was sent, which the search index orders and
+/// narrows results by. An event that cannot be read counts as sent at the epoch: its text is still
+/// found, just never inside a date range.
+#[implement(Service)]
+async fn sent(&self, pdu_id: &RawPduId) -> MilliSecondsSinceUnixEpoch {
+	self.services
+		.timeline
+		.get_pdu_from_id(pdu_id)
+		.await
+		.map_or(MilliSecondsSinceUnixEpoch(UInt::MIN), |pdu| pdu.origin_server_ts())
 }

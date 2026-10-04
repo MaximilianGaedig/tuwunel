@@ -81,7 +81,7 @@ static VERSIONS: [&str; 27] = [
 	"v1.19",  /* mutual rooms (MSC2666) */
 ];
 
-static UNSTABLE_FEATURES: [&str; 53] = [
+static UNSTABLE_FEATURES: [&str; 54] = [
 	// when each person was around: presence changes, events sent, typing, read receipts
 	"im.mxg.activity",
 	// the week of that log can be asked for by kind of activity (`kinds`)
@@ -100,6 +100,9 @@ static UNSTABLE_FEATURES: [&str; 53] = [
 	"im.mxg.media_text",
 	// per-room message counts, by kind and by sender
 	"im.mxg.room_stats",
+	// message search narrowed to a date range (`im.mxg.from_ts` / `im.mxg.to_ts` in the
+	// `room_events` filter), and `order_by: recent` ordering results by when they were sent
+	"im.mxg.search_time_range",
 	// what chats, the account and the server take up
 	"im.mxg.storage",
 	// what a typing user is doing: recording a voice message, sending a photo

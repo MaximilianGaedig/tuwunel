@@ -3,12 +3,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use axum::extract::State;
 use futures::{Stream, StreamExt, TryFutureExt, TryStreamExt, future::join};
 use ruma::{
-	OwnedRoomId, RoomId, UInt, UserId,
+	CanonicalJsonValue, OwnedRoomId, RoomId, UInt, UserId,
 	api::client::search::search_events::{
 		self,
 		v3::{
-			Criteria, EventContext, EventContextResult, ResultCategories, ResultRoomEvents,
-			SearchResult,
+			Criteria, EventContext, EventContextResult, OrderBy, ResultCategories,
+			ResultRoomEvents, SearchResult,
 		},
 	},
 	events::AnyStateEvent,
@@ -27,7 +27,10 @@ use tuwunel_core::{
 };
 use tuwunel_service::{
 	Services,
-	rooms::{search::RoomQuery, timeline::PdusIterItem},
+	rooms::{
+		search::{RoomQuery, SortBy, TimeRange},
+		timeline::PdusIterItem,
+	},
 };
 
 use crate::{Ruma, client::message::visibility_filter};
@@ -39,6 +42,12 @@ const LIMIT_DEFAULT: usize = 10;
 const LIMIT_MAX: usize = 100;
 const CONTEXT_MAX: usize = 20;
 const BATCH_MAX: usize = 20;
+
+/// Unstable keys of the `room_events` filter that keep only messages sent within a range, in
+/// milliseconds since the epoch, both ends included. Either may be left out. Advertised as
+/// `im.mxg.search_time_range` in `/versions`.
+const FROM_TS: &str = "im.mxg.from_ts";
+const TO_TS: &str = "im.mxg.to_ts";
 
 /// # `POST /_matrix/client/r0/search`
 ///
@@ -52,11 +61,14 @@ pub(crate) async fn search_events_route(
 ) -> Result<Response> {
 	let sender_user = body.sender_user();
 	let next_batch = body.next_batch.as_deref();
+	let range = time_range(body.json_body.as_ref());
 	let room_events = body
 		.search_categories
 		.room_events
 		.as_ref()
-		.map_async(|criteria| category_room_events(&services, sender_user, next_batch, criteria))
+		.map_async(|criteria| {
+			category_room_events(&services, sender_user, next_batch, criteria, range)
+		})
 		.await
 		.transpose()?;
 
@@ -73,6 +85,7 @@ async fn category_room_events(
 	sender_user: &UserId,
 	next_batch: Option<&str>,
 	criteria: &Criteria,
+	range: TimeRange,
 ) -> Result<ResultRoomEvents> {
 	let filter = &criteria.filter;
 
@@ -116,6 +129,8 @@ async fn category_room_events(
 		room_ids: &room_ids,
 		user_id: Some(sender_user),
 		criteria,
+		range,
+		sort: sort_by(criteria.order_by.as_ref()),
 		skip: next_batch,
 		limit,
 	};
@@ -180,6 +195,35 @@ async fn category_room_events(
 		highlights,
 		groups: Default::default(), // TODO
 	})
+}
+
+/// The date range in the request's `room_events` filter, read from the request body because the
+/// keys are ours and the typed filter drops them. A bound that is not an integer is ignored.
+fn time_range(json_body: Option<&CanonicalJsonValue>) -> TimeRange {
+	let filter = json_body
+		.and_then(CanonicalJsonValue::as_object)
+		.and_then(|body| body.get("search_categories"))
+		.and_then(CanonicalJsonValue::as_object)
+		.and_then(|categories| categories.get("room_events"))
+		.and_then(CanonicalJsonValue::as_object)
+		.and_then(|room_events| room_events.get("filter"))
+		.and_then(CanonicalJsonValue::as_object);
+
+	let bound = |key: &str| match filter?.get(key)? {
+		| CanonicalJsonValue::Integer(ts) => Some(i64::from(*ts)),
+		| _ => None,
+	};
+
+	TimeRange { from: bound(FROM_TS), to: bound(TO_TS) }
+}
+
+/// `recent` orders results by when they were sent. Otherwise they keep the index's order, newest
+/// first by where the server put them, since results are not ranked by relevance.
+fn sort_by(order_by: Option<&OrderBy>) -> SortBy {
+	match order_by {
+		| Some(OrderBy::Recent) => SortBy::Sent,
+		| _ => SortBy::Timeline,
+	}
 }
 
 async fn event_context<E>(

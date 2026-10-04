@@ -28,6 +28,7 @@
 //! back is still possible: nothing here adds a column family the old binary would not know.
 
 use std::{
+	ops::Bound,
 	path::Path,
 	sync::{
 		Mutex,
@@ -40,7 +41,7 @@ use tantivy::{
 	collector::{Count, TopDocs},
 	directory::MmapDirectory,
 	doc,
-	query::{BooleanQuery, FuzzyTermQuery, Occur, Query, TermQuery, TermSetQuery},
+	query::{BooleanQuery, FuzzyTermQuery, Occur, Query, RangeQuery, TermQuery, TermSetQuery},
 	schema::{
 		FAST, Field, INDEXED, IndexRecordOption, STORED, Schema, TextFieldIndexing, TextOptions,
 		Value,
@@ -79,6 +80,28 @@ struct Fields {
 	/// come back newest first. The count is one server-wide counter, so this orders messages of
 	/// different rooms against each other as well: by when the server took them in.
 	order: Field,
+	/// When the message was sent (`origin_server_ts`, milliseconds), for a date range and for
+	/// results by time. Imported history has its own old times but sits at the start of `order`
+	/// in whatever order it was imported, so only this orders it with everything else.
+	ts: Field,
+}
+
+/// Which messages a search may return by when they were sent, in milliseconds, both ends
+/// included. `None` leaves that end open.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TimeRange {
+	pub from: Option<i64>,
+	pub to: Option<i64>,
+}
+
+/// What results are ordered by, newest first.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SortBy {
+	/// Where the server put them in its timeline.
+	#[default]
+	Timeline,
+	/// When they were sent.
+	Sent,
 }
 
 pub(super) struct Engine {
@@ -114,6 +137,7 @@ impl Engine {
 			body: schema.add_text_field("body", text),
 			pdu: schema.add_bytes_field("pdu", STORED | INDEXED),
 			order: schema.add_i64_field("order", FAST),
+			ts: schema.add_i64_field("ts", FAST),
 		};
 
 		std::fs::create_dir_all(path)
@@ -153,7 +177,14 @@ impl Engine {
 	}
 
 	/// Adds one message. Cheap: it buffers, and {@link commit} makes it searchable.
-	pub(super) fn add(&self, room: ShortRoomId, pdu: &[u8], order: i64, body: &str) -> Result {
+	pub(super) fn add(
+		&self,
+		room: ShortRoomId,
+		pdu: &[u8],
+		order: i64,
+		ts: i64,
+		body: &str,
+	) -> Result {
 		let fields = self.fields;
 		let writer = self
 			.writer
@@ -165,6 +196,7 @@ impl Engine {
 				fields.body => body,
 				fields.pdu => pdu,
 				fields.order => order,
+				fields.ts => ts,
 			))
 			.map_err(|e| err!(Database("Could not index a message: {e}")))?;
 		self.dirty.store(true, Ordering::Release);
@@ -263,15 +295,20 @@ impl Engine {
 	/// and the count are then the search's, not each room's, and a search of every room a user is in
 	/// costs one walk of the index instead of one per room. The forgiving second pass is decided for
 	/// the set as a whole, as it is for one room.
+	///
+	/// `range` keeps only messages sent within it; `sort` says whether newest means where the
+	/// server put a message or when it was sent.
 	pub(super) fn search(
 		&self,
 		rooms: &[ShortRoomId],
 		term: &str,
+		range: TimeRange,
+		sort: SortBy,
 		skip: usize,
 		want: usize,
 	) -> Result<Found> {
 		let searcher = self.reader.searcher();
-		let Some(query) = self.query(rooms, term, false) else {
+		let Some(query) = self.query(rooms, term, range, false) else {
 			return Ok(Found { count: 0, pdus: Vec::new() });
 		};
 
@@ -290,7 +327,7 @@ impl Engine {
 		let query = if count > 0 {
 			query
 		} else {
-			let Some(forgiving) = self.query(rooms, term, true) else {
+			let Some(forgiving) = self.query(rooms, term, range, true) else {
 				return Ok(Found { count: 0, pdus: Vec::new() });
 			};
 			count = searcher
@@ -299,9 +336,13 @@ impl Engine {
 			forgiving
 		};
 
+		let by = match sort {
+			| SortBy::Timeline => "order",
+			| SortBy::Sent => "ts",
+		};
 		let top = TopDocs::with_limit(want)
 			.and_offset(skip)
-			.order_by_fast_field::<i64>("order", Order::Desc);
+			.order_by_fast_field::<i64>(by, Order::Desc);
 
 		let hits = searcher
 			.search(&query, &top)
@@ -340,6 +381,7 @@ impl Engine {
 		&self,
 		rooms: &[ShortRoomId],
 		term: &str,
+		range: TimeRange,
 		forgiving: bool,
 	) -> Option<Box<dyn Query>> {
 		let room_term =
@@ -350,6 +392,18 @@ impl Engine {
 			| rooms => Box::new(TermSetQuery::new(rooms.iter().map(room_term))),
 		};
 		let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, in_rooms)];
+
+		if range != TimeRange::default() {
+			let bound = |ts: Option<i64>| {
+				ts.map_or(Bound::Unbounded, |ts| {
+					Bound::Included(Term::from_field_i64(self.fields.ts, ts))
+				})
+			};
+			clauses.push((
+				Occur::Must,
+				Box::new(RangeQuery::new(bound(range.from), bound(range.to))),
+			));
+		}
 
 		let mut words: usize = 0;
 		for word in tokenize(term) {
@@ -383,7 +437,7 @@ mod tests {
 
 	use tuwunel_core::{Result, utils::random_string};
 
-	use super::{Engine, Found};
+	use super::{Engine, Found, SortBy, TimeRange};
 
 	/// An index in a directory of its own, removed when the test is done with it.
 	struct Scratch {
@@ -396,14 +450,24 @@ mod tests {
 	}
 
 	/// Indexes `(room, order, body)` and makes it searchable straight away. The order doubles as
-	/// the stored key, so a result says which message it was.
+	/// the stored key, so a result says which message it was, and as the time it was sent.
 	fn index(messages: &[(u64, i64, &str)]) -> Result<Scratch> {
+		let timed: Vec<_> = messages
+			.iter()
+			.map(|&(room, order, body)| (room, order, order, body))
+			.collect();
+
+		index_timed(&timed)
+	}
+
+	/// Indexes `(room, order, ts, body)` and makes it searchable straight away.
+	fn index_timed(messages: &[(u64, i64, i64, &str)]) -> Result<Scratch> {
 		let path = temp_dir()
 			.join("tuwunel-search-engine")
 			.join(random_string(16));
 		let engine = Engine::open(&path)?;
-		for &(room, order, body) in messages {
-			engine.add(room, &order.to_be_bytes(), order, body)?;
+		for &(room, order, ts, body) in messages {
+			engine.add(room, &order.to_be_bytes(), order, ts, body)?;
 		}
 		engine.commit()?;
 		engine
@@ -443,7 +507,14 @@ mod tests {
 	fn a_page_of_several_rooms_is_one_page_newest_first_across_them() -> Result {
 		let scratch = index(ROOMS)?;
 
-		let found = scratch.engine.search(&[1, 2], "hello", 0, 3)?;
+		let found = scratch.engine.search(
+			&[1, 2],
+			"hello",
+			TimeRange::default(),
+			SortBy::Timeline,
+			0,
+			3,
+		)?;
 		assert_eq!(orders(&found), [7, 6, 4], "not the newest three across both rooms");
 		assert_eq!(found.count, 7, "the count is not every match in both rooms");
 
@@ -458,7 +529,14 @@ mod tests {
 
 		let mut seen = Vec::new();
 		for skip in (0..10).step_by(3) {
-			seen.extend(orders(&scratch.engine.search(&[1, 2], "hello", skip, 3)?));
+			seen.extend(orders(&scratch.engine.search(
+				&[1, 2],
+				"hello",
+				TimeRange::default(),
+				SortBy::Timeline,
+				skip,
+				3,
+			)?));
 		}
 		assert_eq!(seen, [7, 6, 4, 3, 2, 1, -3]);
 
@@ -470,11 +548,21 @@ mod tests {
 	fn one_room_finds_only_its_own_messages() -> Result {
 		let scratch = index(ROOMS)?;
 
-		let found = scratch.engine.search(&[2], "hello", 0, 10)?;
+		let found = scratch.engine.search(
+			&[2],
+			"hello",
+			TimeRange::default(),
+			SortBy::Timeline,
+			0,
+			10,
+		)?;
 		assert_eq!(orders(&found), [7, 4, 2]);
 		assert_eq!(found.count, 3);
 
-		let found = scratch.engine.search(&[], "hello", 0, 10)?;
+		let found =
+			scratch
+				.engine
+				.search(&[], "hello", TimeRange::default(), SortBy::Timeline, 0, 10)?;
 		assert_eq!((found.count, found.pdus.len()), (0, 0), "no rooms found something");
 
 		Ok(())
@@ -486,11 +574,88 @@ mod tests {
 	fn a_typo_is_forgiven_only_when_no_room_matched_as_typed() -> Result {
 		let scratch = index(&[(1, 1, "hallo there"), (2, 2, "hello there"), (2, 3, "help")])?;
 
-		let found = scratch.engine.search(&[1, 2], "hello", 0, 10)?;
+		let found = scratch.engine.search(
+			&[1, 2],
+			"hello",
+			TimeRange::default(),
+			SortBy::Timeline,
+			0,
+			10,
+		)?;
 		assert_eq!(orders(&found), [2], "an exact match was diluted by a forgiven one");
 
-		let found = scratch.engine.search(&[1, 2], "helo", 0, 10)?;
+		let found = scratch.engine.search(
+			&[1, 2],
+			"helo",
+			TimeRange::default(),
+			SortBy::Timeline,
+			0,
+			10,
+		)?;
 		assert_eq!(orders(&found), [3, 2], "nothing exact, yet one edit was not forgiven");
+
+		Ok(())
+	}
+
+	/// Imported history: the server took these in in this order, but they were sent long before,
+	/// and in another order. Room 1's import came last and is the oldest.
+	const IMPORTED: &[(u64, i64, i64, &str)] = &[
+		(2, 1, 5_000, "meet at noon"),
+		(2, 2, 6_000, "meet at one"),
+		(1, 3, 1_000, "meet at nine"),
+		(1, 4, 2_000, "meet at ten"),
+		(2, 5, 7_000, "meet tomorrow"),
+	];
+
+	// A date range keeps what was sent inside it, both ends included, from every room asked
+	// about, and the count is of those alone.
+	#[test]
+	fn a_date_range_keeps_what_was_sent_inside_it() -> Result {
+		let scratch = index_timed(IMPORTED)?;
+		let range = TimeRange { from: Some(2_000), to: Some(6_000) };
+
+		let found = scratch
+			.engine
+			.search(&[1, 2], "meet", range, SortBy::Timeline, 0, 10)?;
+		assert_eq!(orders(&found), [4, 2, 1]);
+		assert_eq!(found.count, 3);
+
+		let open_start = TimeRange { from: None, to: Some(1_999) };
+		let found =
+			scratch
+				.engine
+				.search(&[1, 2], "meet", open_start, SortBy::Timeline, 0, 10)?;
+		assert_eq!(orders(&found), [3]);
+
+		let open_end = TimeRange { from: Some(6_001), to: None };
+		let found = scratch
+			.engine
+			.search(&[1, 2], "meet", open_end, SortBy::Timeline, 0, 10)?;
+		assert_eq!(orders(&found), [5]);
+
+		Ok(())
+	}
+
+	// By time, the imported room's messages go where they were sent, not where they were taken in.
+	#[test]
+	fn results_by_time_are_newest_sent_first_across_rooms() -> Result {
+		let scratch = index_timed(IMPORTED)?;
+
+		let found =
+			scratch
+				.engine
+				.search(&[1, 2], "meet", TimeRange::default(), SortBy::Sent, 0, 10)?;
+		assert_eq!(orders(&found), [5, 2, 1, 4, 3]);
+
+		let found = scratch.engine.search(
+			&[1, 2],
+			"meet",
+			TimeRange::default(),
+			SortBy::Timeline,
+			0,
+			10,
+		)?;
+		assert_eq!(orders(&found), [5, 4, 3, 2, 1], "the default order changed");
 
 		Ok(())
 	}

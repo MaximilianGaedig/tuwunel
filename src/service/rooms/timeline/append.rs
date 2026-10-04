@@ -303,9 +303,12 @@ pub(super) async fn append_pdu_effects(
 		| TimelineEventType::RoomMessage => {
 			let content: ExtractBody = pdu.get_content()?;
 			if let Some(body) = content.body {
-				self.services
-					.search
-					.index_pdu(shortroomid, &pdu_id, &body);
+				self.services.search.index_pdu(
+					shortroomid,
+					&pdu_id,
+					pdu.origin_server_ts(),
+					&body,
+				);
 
 				if self
 					.services
@@ -322,9 +325,12 @@ pub(super) async fn append_pdu_effects(
 		},
 		| TimelineEventType::RoomTopic =>
 			if let Some(topic) = pdu.get_content().ok().and_then(plain_text_topic) {
-				self.services
-					.search
-					.index_pdu(shortroomid, &pdu_id, &topic);
+				self.services.search.index_pdu(
+					shortroomid,
+					&pdu_id,
+					pdu.origin_server_ts(),
+					&topic,
+				);
 			},
 		| _ => {},
 	}
@@ -442,7 +448,12 @@ async fn append_member_effects(&self, pdu: &PduEvent, count: PduCount) -> Result
 }
 
 #[implement(super::Service)]
-pub(super) fn append_pdu_json(&self, pdu_id: &RawPduId, pdu: &PduEvent, json: &CanonicalJsonObject) {
+pub(super) fn append_pdu_json(
+	&self,
+	pdu_id: &RawPduId,
+	pdu: &PduEvent,
+	json: &CanonicalJsonObject,
+) {
 	debug_assert!(matches!(pdu_id.pdu_count(), PduCount::Normal(_)), "PduCount not Normal");
 
 	let mut txn = self.db.db.txn();

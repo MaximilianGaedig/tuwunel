@@ -6,7 +6,7 @@ use std::{pin::pin, sync::Arc};
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use ruma::{
-	RoomId, UserId,
+	MilliSecondsSinceUnixEpoch, RoomId, UserId,
 	api::client::search::search_events::v3::Criteria,
 	events::{TimelineEventType, room::topic::RoomTopicEventContent},
 };
@@ -25,6 +25,7 @@ use tuwunel_core::{
 use tuwunel_database::{Deserialized, Map};
 
 use self::engine::Engine;
+pub use self::engine::{SortBy, TimeRange};
 use crate::rooms::{short::ShortRoomId, state_accessor::plain_text_topic, timeline::RawPduId};
 
 pub struct Service {
@@ -40,6 +41,10 @@ pub struct RoomQuery<'a> {
 	pub room_ids: &'a [&'a RoomId],
 	pub user_id: Option<&'a UserId>,
 	pub criteria: &'a Criteria,
+	/// Only messages sent within it.
+	pub range: TimeRange,
+	/// Newest first by where the server put them, or by when they were sent.
+	pub sort: SortBy,
 	pub limit: usize,
 	pub skip: usize,
 }
@@ -61,8 +66,14 @@ const COMMIT_EVERY: Duration = Duration::from_secs(1);
 /// old rules is then indexed again on the next start, without anyone having to ask.
 ///
 /// 1. message bodies and plain-text topics, words folded for case and accents.
-const INDEX_VERSION: u64 = 1;
+/// 2. and when each message was sent, in a new directory ([`INDEX_DIR`]).
+const INDEX_VERSION: u64 = 2;
 const INDEX_VERSION_KEY: &[u8] = b"search_index_version";
+
+/// Where the index lives, inside the database directory. It changes with the index's columns:
+/// tantivy will not open an index whose columns differ, and the old directory is left alone so a
+/// rolled-back binary still finds the index it knows (the messages since are missing from it).
+const INDEX_DIR: &str = "search.v2";
 
 /// Stored while a rebuild is under way and replaced by [`INDEX_VERSION`] when it finishes. A rebuild
 /// that stops part-way therefore leaves a version older than any real one, and the next start does
@@ -109,7 +120,7 @@ const OVERFETCH: usize = 16;
 #[async_trait]
 impl crate::Service for Service {
 	fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
-		let path = args.server.config.database_path.join("search");
+		let path = args.server.config.database_path.join(INDEX_DIR);
 
 		Ok(Arc::new(Self {
 			engine: Engine::open(&path)?,
@@ -185,11 +196,18 @@ impl crate::Service for Service {
 }
 
 #[implement(Service)]
-pub fn index_pdu(&self, shortroomid: ShortRoomId, pdu_id: &RawPduId, message_body: &str) {
+pub fn index_pdu(
+	&self,
+	shortroomid: ShortRoomId,
+	pdu_id: &RawPduId,
+	sent: MilliSecondsSinceUnixEpoch,
+	message_body: &str,
+) {
 	let order = pdu_id.pdu_count().into_signed();
+	let ts = i64::from(sent.get());
 	if let Err(e) = self
 		.engine
-		.add(shortroomid, pdu_id.as_ref(), order, message_body)
+		.add(shortroomid, pdu_id.as_ref(), order, ts, message_body)
 	{
 		error!("Could not index a message for search: {e}");
 	}
@@ -241,10 +259,19 @@ pub async fn rebuild_words(&self) -> Result<usize> {
 			if let Some(text) = searchable_text(pdu.event_type(), pdu.content().get()) {
 				// The timeline hands back the count; the index is keyed by the packed id.
 				let pdu_id: RawPduId = PduId { shortroomid, count }.into();
-				self.index_pdu(shortroomid, &pdu_id, &text);
+				self.index_pdu(shortroomid, &pdu_id, pdu.origin_server_ts(), &text);
 				indexed = indexed.saturating_add(1);
 			}
 		}
+
+		// What media said (text read off a picture, a voice message) is not in the events: it is
+		// put back from where it is kept, or a rebuild would forget it.
+		let media = self
+			.services
+			.media_text
+			.reindex_room(shortroomid)
+			.await;
+		indexed = indexed.saturating_add(media);
 	}
 
 	// The worker's timer has been committing all along; this is the remainder, and it has to be
@@ -312,9 +339,14 @@ pub async fn search_pdus<'a>(
 		.saturating_add(query.limit)
 		.saturating_add(OVERFETCH);
 
-	let found = self
-		.engine
-		.search(&shortroomids, &query.criteria.search_term, 0, want)?;
+	let found = self.engine.search(
+		&shortroomids,
+		&query.criteria.search_term,
+		query.range,
+		query.sort,
+		0,
+		want,
+	)?;
 
 	// What the index found, in its order, less what is redacted, filtered out or not visible to
 	// the reader. The offset is applied after those drops, so it counts results the reader got.
@@ -363,12 +395,13 @@ pub async fn delete_all_search_tokenids_for_room(&self, room_id: &RoomId) -> Res
 mod tests {
 	use std::{fs, path::Path, time::SystemTime};
 
-	use ruma::events::TimelineEventType;
+	use ruma::{MilliSecondsSinceUnixEpoch, events::TimelineEventType};
 	use tokio::time::{Duration, sleep};
 	use tuwunel_core::{Result, config::Figment};
 
 	use super::{
-		COMMIT_EVERY, INDEX_VERSION, REBUILDING, Startup, searchable_text, startup_action,
+		COMMIT_EVERY, INDEX_DIR, INDEX_VERSION, REBUILDING, SortBy, Startup, TimeRange,
+		searchable_text, startup_action,
 	};
 	use crate::test_utils::{fixture, pdu_id};
 
@@ -393,7 +426,11 @@ mod tests {
 
 		let service = &fixture.services.search;
 		let engine = &service.engine;
-		let index = service.server.config.database_path.join("search");
+		let index = service
+			.server
+			.config
+			.database_path
+			.join(INDEX_DIR);
 
 		let opened = committed_at(&index)?;
 		sleep(A_MOMENT).await;
@@ -401,7 +438,7 @@ mod tests {
 		assert!(!engine.commit()?, "a commit of nothing said it committed");
 		assert_eq!(committed_at(&index)?, opened, "a commit of nothing wrote the index");
 
-		service.index_pdu(1, &pdu_id(1), "hello there");
+		service.index_pdu(1, &pdu_id(1), MilliSecondsSinceUnixEpoch::now(), "hello there");
 		assert!(engine.is_dirty());
 		assert!(engine.commit()?);
 		assert!(!engine.is_dirty());
@@ -422,7 +459,7 @@ mod tests {
 		assert!(engine.commit()?);
 
 		// Clearing commits by itself, and takes with it what was waiting.
-		service.index_pdu(1, &pdu_id(2), "to be cleared");
+		service.index_pdu(1, &pdu_id(2), MilliSecondsSinceUnixEpoch::now(), "to be cleared");
 		engine.clear()?;
 		assert!(!engine.is_dirty());
 		let cleared = committed_at(&index)?;
@@ -447,11 +484,11 @@ mod tests {
 		let engine = &service.engine;
 		let found = || {
 			engine
-				.search(&[1], "hello", 0, 10)
+				.search(&[1], "hello", TimeRange::default(), SortBy::Timeline, 0, 10)
 				.map(|found| found.count)
 		};
 
-		service.index_pdu(1, &pdu_id(1), "hello there");
+		service.index_pdu(1, &pdu_id(1), MilliSecondsSinceUnixEpoch::now(), "hello there");
 		assert_eq!(found()?, 0, "found before it was committed");
 		assert!(engine.commit()?);
 
@@ -497,7 +534,7 @@ mod tests {
 	// table and raise INDEX_VERSION, or existing history keeps being indexed by the old ones.
 	#[test]
 	fn the_rules_are_the_ones_the_version_names() {
-		assert_eq!(INDEX_VERSION, 1);
+		assert_eq!(INDEX_VERSION, 2);
 		let text = |kind: &TimelineEventType, content| searchable_text(kind, content);
 		assert_eq!(
 			text(&TimelineEventType::RoomMessage, r#"{"msgtype":"m.text","body":"hello"}"#),

@@ -326,16 +326,22 @@ fn index_text(&self, shortroomid: crate::rooms::short::ShortRoomId, pdu_id: &Raw
 	match *pdu.event_type() {
 		| TimelineEventType::RoomMessage => {
 			if let Ok(ExtractBody { body: Some(body) }) = pdu.get_content() {
-				self.services
-					.search
-					.index_pdu(shortroomid, pdu_id, &body);
+				self.services.search.index_pdu(
+					shortroomid,
+					pdu_id,
+					pdu.origin_server_ts(),
+					&body,
+				);
 			}
 		},
 		| TimelineEventType::RoomTopic =>
 			if let Some(topic) = pdu.get_content().ok().and_then(plain_text_topic) {
-				self.services
-					.search
-					.index_pdu(shortroomid, pdu_id, &topic);
+				self.services.search.index_pdu(
+					shortroomid,
+					pdu_id,
+					pdu.origin_server_ts(),
+					&topic,
+				);
 			},
 		| _ => {},
 	}
