@@ -211,6 +211,7 @@ where
 			pdu.room_id(),
 			None,
 			&ReceiptThread::Unthreaded,
+			None,
 		)
 		.await;
 

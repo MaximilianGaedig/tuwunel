@@ -92,7 +92,8 @@ async fn set_private_marker(
 	Ok(advanced)
 }
 
-/// Clears the receipt's notification counts and refreshes the push badge.
+/// Lowers the receipt's notification counts to what is still unread after
+/// the furthest of the `read` events, and refreshes the push badge.
 ///
 /// The refresh follows every advance because the gateway can hold a stale
 /// badge while the stored count is already zero; only a delivery reconciles
@@ -103,10 +104,13 @@ async fn reset_and_refresh_badge(
 	room_id: &RoomId,
 	acknowledged: Option<&EventId>,
 	thread: &ReceiptThread,
+	read: &[&EventId],
 ) {
+	let read_at = read_position(services, read).await;
+
 	services
 		.pusher
-		.reset_notification_counts_for_thread(user_id, room_id, acknowledged, thread)
+		.reset_notification_counts_for_thread(user_id, room_id, acknowledged, thread, read_at)
 		.await;
 
 	services
@@ -115,6 +119,20 @@ async fn reset_and_refresh_badge(
 		.await
 		.log_err()
 		.ok();
+}
+
+/// The furthest timeline position among `events`.
+///
+/// `None` when none of them resolves, which clears the counts as a read to
+/// the end did before counts were recounted.
+async fn read_position(services: &Services, events: &[&EventId]) -> Option<PduCount> {
+	let mut furthest = None;
+	for event in events {
+		let count = services.timeline.get_pdu_count(event).await.ok();
+		furthest = furthest.max(count);
+	}
+
+	furthest
 }
 
 #[cfg(test)]

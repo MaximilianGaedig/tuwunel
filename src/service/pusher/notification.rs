@@ -1,10 +1,16 @@
 use std::{collections::BTreeMap, fmt::Debug};
 
 use futures::{StreamExt, future::join3, stream::select};
-use ruma::{EventId, OwnedEventId, RoomId, UserId, events::receipt::ReceiptThread};
+use ruma::{
+	EventId, OwnedEventId, RoomId, UserId,
+	events::receipt::ReceiptThread,
+	push::{Action, HighlightTweakValue, Tweak},
+};
 use serde::Serialize;
 use tuwunel_core::{
-	Result, implement, trace,
+	Result, debug, implement,
+	matrix::pdu::{PduCount, PduId, RawPduId},
+	trace,
 	utils::{
 		stream::{BroadbandExt, ReadyExt, TryIgnore},
 		u64_from_u8,
@@ -13,6 +19,8 @@ use tuwunel_core::{
 use tuwunel_database::{
 	Deserialized, Ignore, IgnoreAll, Interfix, KeyBuf, deserialize_from_slice as deserialize_key,
 };
+
+use super::Notified;
 
 /// Per-thread unread counts: `(notification, highlight)` keyed by thread root.
 type ThreadCounts = BTreeMap<OwnedEventId, (u64, u64)>;
@@ -134,9 +142,14 @@ pub async fn clear_all_thread_notification_counts(&self, user_id: &UserId, room_
 
 /// Dispatcher: route a receipt's `ReceiptThread` to the matching reset path.
 ///
-/// `Unthreaded` clears all room and thread counts; `Main` clears only the
-/// main-timeline counts; `Thread(id)` clears just that thread unless the
+/// `Unthreaded` settles all room and thread counts; `Main` only the
+/// main-timeline counts; `Thread(id)` just that thread unless the
 /// acknowledged event is the thread root. `None` denotes a non-receipt reset.
+///
+/// `read_at` is how far the user has read. The counts become what is still
+/// unread after it, recounted from the notifications stored per event, and
+/// never rise above what they were. `None` means everything is read, as when
+/// the user sends a message.
 #[implement(super::Service)]
 pub async fn reset_notification_counts_for_thread(
 	&self,
@@ -144,9 +157,55 @@ pub async fn reset_notification_counts_for_thread(
 	room_id: &RoomId,
 	acknowledged: Option<&EventId>,
 	thread: &ReceiptThread,
+	read_at: Option<PduCount>,
+) {
+	if matches!(thread, ReceiptThread::Thread(root) if acknowledged == Some(root)) {
+		return;
+	}
+
+	let left = match read_at {
+		| Some(read_at) => self.unread_after(user_id, room_id, read_at).await,
+		| None => Some(Unread::default()),
+	};
+
+	let Some(left) = left.filter(|left| !left.is_empty()) else {
+		self.clear_notification_counts_for_thread(user_id, room_id, thread)
+			.await;
+		return;
+	};
+
+	match thread {
+		| ReceiptThread::Main =>
+			self.settle_main_counts(user_id, room_id, left.main())
+				.await,
+		| ReceiptThread::Thread(root) =>
+			self.settle_thread_counts(user_id, room_id, root, left.thread(root))
+				.await,
+		| _ => {
+			self.settle_main_counts(user_id, room_id, left.main())
+				.await;
+
+			let threads = self
+				.thread_notification_counts(user_id, room_id)
+				.await;
+
+			for root in threads.keys() {
+				self.settle_thread_counts(user_id, room_id, root, left.thread(root))
+					.await;
+			}
+		},
+	}
+}
+
+/// The reset every read did before counts were recounted: all to zero.
+#[implement(super::Service)]
+async fn clear_notification_counts_for_thread(
+	&self,
+	user_id: &UserId,
+	room_id: &RoomId,
+	thread: &ReceiptThread,
 ) {
 	match thread {
-		| ReceiptThread::Thread(root) if acknowledged == Some(root) => {},
 		| ReceiptThread::Main =>
 			self.reset_notification_counts(user_id, room_id)
 				.await,
@@ -160,6 +219,186 @@ pub async fn reset_notification_counts_for_thread(
 			self.clear_all_thread_notification_counts(user_id, room_id)
 				.await;
 		},
+	}
+}
+
+/// Lowers the main-timeline counts to `left`, or clears them when nothing
+/// is left.
+#[implement(super::Service)]
+async fn settle_main_counts(&self, user_id: &UserId, room_id: &RoomId, left: (u64, u64)) {
+	if left == (0, 0) {
+		self.reset_notification_counts(user_id, room_id)
+			.await;
+		return;
+	}
+
+	let count = self.services.globals.next_count();
+	let userroom_id = (user_id, room_id);
+
+	self.lower_counts(room_id, user_id, userroom_id, left)
+		.await;
+
+	self.db
+		.roomuserid_lastnotificationread
+		.put((room_id, user_id), *count);
+
+	self.clear_suppressed_room(user_id, room_id);
+}
+
+/// Lowers one thread's counts to `left`, or clears them when nothing is
+/// left.
+#[implement(super::Service)]
+async fn settle_thread_counts(
+	&self,
+	user_id: &UserId,
+	room_id: &RoomId,
+	root: &EventId,
+	left: (u64, u64),
+) {
+	if left == (0, 0) {
+		self.reset_thread_notification_counts(user_id, room_id, root)
+			.await;
+		return;
+	}
+
+	let count = self.services.globals.next_count();
+
+	self.lower_counts(room_id, user_id, (user_id, room_id, root), left)
+		.await;
+
+	self.db
+		.roomuserid_lastnotificationread
+		.put((room_id, user_id, root), *count);
+}
+
+/// Sets the `(notification, highlight)` counts at `key` to `left` where that
+/// is lower than what is stored.
+///
+/// Both locks of the increment paths are held: a read-modify-write there
+/// must not land between the read and the write here.
+#[implement(super::Service)]
+async fn lower_counts<K>(&self, room_id: &RoomId, user_id: &UserId, key: K, left: (u64, u64))
+where
+	K: Serialize + Debug + Send + Sync,
+{
+	let lock_key = (room_id.to_owned(), user_id.to_owned());
+	let _notification = self
+		.notification_increment_mutex
+		.lock(&lock_key)
+		.await;
+	let _highlight = self
+		.highlight_increment_mutex
+		.lock(&lock_key)
+		.await;
+
+	for (map, left) in [
+		(&self.db.userroomid_notificationcount, left.0),
+		(&self.db.userroomid_highlightcount, left.1),
+	] {
+		let current: u64 = map.qry(&key).await.deserialized().unwrap_or(0);
+
+		map.put(&key, current.min(left));
+	}
+}
+
+/// The notifications still unread in a room once the user has read up to
+/// `read_at`, by thread.
+///
+/// Read from the notifications stored per event at append time, which only
+/// exist for events with a forward position. `None` when the scan would be
+/// too long to answer a receipt with; the caller then clears the counts.
+#[implement(super::Service)]
+async fn unread_after(
+	&self,
+	user_id: &UserId,
+	room_id: &RoomId,
+	read_at: PduCount,
+) -> Option<Unread> {
+	let shortroomid = self
+		.services
+		.short
+		.get_shortroomid(room_id)
+		.await
+		.ok()?;
+
+	let start = match read_at {
+		| PduCount::Normal(count) => count.saturating_add(1),
+		| PduCount::Backfilled(_) => 0,
+	};
+
+	// Rows of other rooms are kept as `None` so the limit counts every row
+	// read, not only the matching ones.
+	let scanned: Vec<Option<(u64, Notified)>> = self
+		.db
+		.useridcount_notification
+		.stream_from(&(user_id, start))
+		.ignore_err()
+		.ready_take_while(|((user, _), _): &((&UserId, u64), Notified)| *user == user_id)
+		.map(|((_, count), notified)| {
+			(notified.sroomid == shortroomid).then_some((count, notified))
+		})
+		.take(RECOUNT_SCAN_LIMIT.saturating_add(1))
+		.collect()
+		.await;
+
+	if scanned.len() > RECOUNT_SCAN_LIMIT {
+		debug!(%user_id, %room_id, "Too many notifications after the read to recount");
+		return None;
+	}
+
+	let mut unread = Unread::default();
+	for (count, notified) in scanned.into_iter().flatten() {
+		let notify = notified.actions.iter().any(Action::should_notify);
+
+		let highlight = notified.actions.iter().any(|action| {
+			matches!(action, Action::SetTweak(Tweak::Highlight(HighlightTweakValue::Yes)))
+		});
+
+		let pdu_id: RawPduId = PduId {
+			shortroomid,
+			count: PduCount::Normal(count),
+		}
+		.into();
+		let Ok(pdu) = self
+			.services
+			.timeline
+			.get_pdu_from_id(&pdu_id)
+			.await
+		else {
+			continue;
+		};
+
+		let root = self.services.threads.get_thread_id(&pdu).await;
+		unread.add(root, notify, highlight);
+	}
+
+	Some(unread)
+}
+
+/// Most stored notifications a recount reads before it gives up.
+const RECOUNT_SCAN_LIMIT: usize = 20_000;
+
+/// Unread `(notification, highlight)` counts by thread root; `None` is the
+/// main timeline.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct Unread(BTreeMap<Option<OwnedEventId>, (u64, u64)>);
+
+impl Unread {
+	pub(super) fn add(&mut self, root: Option<OwnedEventId>, notify: bool, highlight: bool) {
+		let entry = self.0.entry(root).or_default();
+		entry.0 = entry.0.saturating_add(notify.into());
+		entry.1 = entry.1.saturating_add(highlight.into());
+	}
+
+	pub(super) fn is_empty(&self) -> bool { self.0.values().all(|counts| *counts == (0, 0)) }
+
+	pub(super) fn main(&self) -> (u64, u64) { self.0.get(&None).copied().unwrap_or_default() }
+
+	pub(super) fn thread(&self, root: &EventId) -> (u64, u64) {
+		self.0
+			.get(&Some(root.to_owned()))
+			.copied()
+			.unwrap_or_default()
 	}
 }
 

@@ -146,6 +146,7 @@ pub(crate) async fn create_receipt_route(
 			&body.room_id,
 			Some(&body.event_id),
 			&body.thread,
+			&[&body.event_id],
 		)
 		.await;
 	}
