@@ -262,6 +262,10 @@ impl Service {
 		}
 	}
 
+	/// Resolves at the next presence change of any user, so that a long-poll
+	/// waiting on presence wakes for it. Subscribes at the call.
+	pub fn watch(&self) -> impl Future<Output = ()> + Send + '_ { self.db.watch() }
+
 	/// Returns the most recent presence updates that happened after the event
 	/// with id `since`.
 	pub fn presence_since(

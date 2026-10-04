@@ -699,3 +699,64 @@ fn ranges_from_u64(ranges: &[(u64, u64)]) -> Ranges {
 fn uint(value: u64) -> UInt { UInt::new(value).expect("range value must fit UInt") }
 
 fn list_id() -> ListId { LIST_ID.into() }
+
+fn presence_request(enabled: Option<bool>) -> Request {
+	let mut request = Request::new();
+	request.extensions.presence.enabled = enabled;
+
+	request
+}
+
+#[test]
+fn presence_is_not_owed_until_the_extension_is_enabled() {
+	let mut conn = Connection::default();
+	conn.update_cache(&presence_request(None));
+
+	assert!(!conn.presence_owed());
+}
+
+#[test]
+fn presence_picture_is_owed_once_then_only_changes() {
+	let mut conn = Connection::default();
+	conn.update_cache(&presence_request(Some(true)));
+
+	assert!(conn.presence_owed(), "a new connection is owed the whole picture");
+
+	conn.next_batch = 7;
+	conn.update_presence_epilogue();
+
+	// The client advances to the response that carried it.
+	conn.globalsince = 7;
+	conn.next_batch = 9;
+	assert!(!conn.presence_owed(), "a resumed connection is owed changes only");
+
+	// The client replays from before the response that carried the picture.
+	conn.globalsince = 3;
+	assert!(conn.presence_owed(), "a replay from before the base is owed it again");
+}
+
+#[test]
+fn presence_picture_is_owed_again_after_the_extension_is_switched_off() {
+	let mut conn = Connection::default();
+	conn.update_cache(&presence_request(Some(true)));
+	conn.next_batch = 7;
+	conn.update_presence_epilogue();
+	conn.globalsince = 7;
+	assert!(!conn.presence_owed());
+
+	conn.update_cache(&presence_request(Some(false)));
+	assert!(!conn.presence_owed());
+	assert_eq!(conn.presence_base, 0);
+
+	conn.update_cache(&presence_request(Some(true)));
+	assert!(conn.presence_owed(), "switching it back on sends the picture anew");
+}
+
+#[test]
+fn presence_enablement_is_sticky_across_omitted_requests() {
+	let mut conn = Connection::default();
+	conn.update_cache(&presence_request(Some(true)));
+	conn.update_cache(&presence_request(None));
+
+	assert_eq!(conn.extensions.presence.enabled, Some(true));
+}

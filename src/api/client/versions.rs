@@ -81,7 +81,7 @@ static VERSIONS: [&str; 27] = [
 	"v1.19",  /* mutual rooms (MSC2666) */
 ];
 
-static UNSTABLE_FEATURES: [&str; 51] = [
+static UNSTABLE_FEATURES: [&str; 52] = [
 	// when each person was around: presence changes, events sent, typing, read receipts
 	"im.mxg.activity",
 	// the week of that log can be asked for by kind of activity (`kinds`)
@@ -90,6 +90,9 @@ static UNSTABLE_FEATURES: [&str; 51] = [
 	"im.mxg.export",
 	// a room's media, files, links, music and voice lists, from an index
 	"im.mxg.media_index",
+	// presence in simplified sliding sync, as the `im.mxg.presence` extension, in place of a
+	// second `/sync` long-poll
+	"im.mxg.msc4186.presence",
 	// what media says: text read off a picture, what a voice message said
 	"im.mxg.media_text",
 	// per-room message counts, by kind and by sender

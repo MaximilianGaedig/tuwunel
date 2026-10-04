@@ -172,7 +172,7 @@ enum StateAfter {
 	Unstable,
 }
 
-type PresenceUpdates = HashMap<OwnedUserId, PresenceEventContent>;
+pub(super) type PresenceUpdates = HashMap<OwnedUserId, PresenceEventContent>;
 type TimelineEventIds = SmallVec<[OwnedEventId; 1]>;
 
 impl StateAfter {
@@ -943,7 +943,7 @@ fn collect_device_list_left<'a>(
 		.collect()
 }
 
-fn build_presence_events(presence_updates: Option<PresenceUpdates>) -> Vec<Raw<PresenceEvent>> {
+pub(super) fn build_presence_events(presence_updates: Option<PresenceUpdates>) -> Vec<Raw<PresenceEvent>> {
 	presence_updates
 		.into_iter()
 		.flat_map(IntoIterator::into_iter)
@@ -954,7 +954,7 @@ fn build_presence_events(presence_updates: Option<PresenceUpdates>) -> Vec<Raw<P
 }
 
 #[tracing::instrument(name = "presence", level = "debug", skip_all)]
-async fn process_presence_updates(
+pub(super) async fn process_presence_updates(
 	services: &Services,
 	since: u64,
 	next_batch: u64,

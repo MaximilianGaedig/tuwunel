@@ -189,6 +189,15 @@ impl Data {
 		self.userid_presenceid.remove(user_id);
 	}
 
+	/// Resolves at the next write to any presence row. The subscription is made
+	/// when this is called, not when it is first polled.
+	#[inline]
+	pub(super) fn watch(&self) -> impl Future<Output = ()> + Send + '_ {
+		let all: &[u8] = &[];
+
+		self.presenceid_presence.watch_raw_prefix(all)
+	}
+
 	/// The rows written after `since`, up to and including `to`, oldest first.
 	///
 	/// Every sync asks this, nearly always for the last few rows, and the table holds one row for

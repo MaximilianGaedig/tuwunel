@@ -13,7 +13,10 @@ use std::{
 };
 
 use axum::extract::{Extension, State};
-use futures::{FutureExt, TryFutureExt, future::join};
+use futures::{
+	FutureExt, TryFutureExt,
+	future::{join, select},
+};
 use ruma::{
 	DeviceId, OwnedRoomId, UserId,
 	api::client::sync::sync_events::v5::{ListId, Request, Response, response},
@@ -178,7 +181,7 @@ pub(crate) async fn sync_events_v5_route(
 	let caught_up = conn.globalsince == conn.next_batch;
 
 	// A whole profile owed to a caught-up connection needs a pass like a new list.
-	let needs_pass = config_changed || conn.own_profile_owed();
+	let needs_pass = config_changed || conn.own_profile_owed() || conn.presence_owed();
 
 	if config_change_needs_position(needs_pass, advancing, caught_up, since) {
 		// The permit publishes the reserved position when it retires on drop.
@@ -211,6 +214,21 @@ pub(crate) async fn sync_events_v5_route(
 			.watch(sender_user, sender_device, services.state_cache.rooms_joined(sender_user))
 			.await;
 
+		// Registered with the others, before the state is sampled, so that a
+		// presence change in between is not missed.
+		let presence_watch = (services.config.allow_local_presence
+			&& conn.extensions.presence.enabled.unwrap_or(false))
+		.then(|| services.presence.watch());
+
+		let watchers = async move {
+			match presence_watch {
+				| Some(presence_watch) => {
+					select(watchers.boxed(), presence_watch.boxed()).await;
+				},
+				| None => watchers.await,
+			}
+		};
+
 		conn.next_batch = services.globals.wait_pending().await?;
 		let direct_rooms = services
 			.account_data
@@ -240,6 +258,7 @@ pub(crate) async fn sync_events_v5_route(
 			apply_ranges(&conn, &window, &mut ranges, &mut extensions);
 			conn.update_rooms_epilogue(ranges.room_updates());
 			conn.update_profiles_epilogue();
+			conn.update_presence_epilogue();
 			response.rooms = ranges.into_payloads();
 			response.extensions = extensions.into_response(&response.rooms);
 

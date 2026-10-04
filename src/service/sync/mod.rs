@@ -15,7 +15,7 @@ use ruma::{
 	DeviceId, OwnedDeviceId, OwnedRoomId, OwnedUserId, RoomId, UserId,
 	api::client::sync::sync_events::v5::{
 		ConnId as ConnectionId, ListId, Request, request,
-		request::{AccountData, E2EE, Profiles, Receipts, ToDevice, Typing},
+		request::{AccountData, E2EE, Presence, Profiles, Receipts, ToDevice, Typing},
 	},
 	profile::ProfileFieldName,
 };
@@ -89,6 +89,14 @@ pub struct Connection {
 	/// owes when the extension goes off.
 	#[serde(default)]
 	pub profiles_fields_widened: bool,
+
+	/// Position of the response that last carried the whole presence picture
+	/// in the `im.mxg.presence` extension.
+	///
+	/// Zero until a response has carried it, and again whenever the extension
+	/// is switched off, so switching it back on sends the picture anew.
+	#[serde(default)]
+	pub presence_base: u64,
 }
 
 /// Delivery progress for one room on a Sliding Sync connection.
@@ -434,6 +442,33 @@ pub fn own_profile_owed(&self) -> bool {
 		&& (self.own_profile_since == 0 || self.own_profile_since > self.globalsince)
 }
 
+/// Records that this pass carried the whole presence picture.
+///
+/// Called once the pass has assembled its extensions, so a pass that failed
+/// leaves the picture owed to the next one.
+#[implement(Connection)]
+#[tracing::instrument(level = "debug", skip_all)]
+pub fn update_presence_epilogue(&mut self) {
+	if self.presence_owed() {
+		self.presence_base = self.next_batch;
+	}
+}
+
+/// Whether the whole presence picture is owed to the `im.mxg.presence`
+/// extension, rather than only the changes since `globalsince`.
+///
+/// It is owed while the extension is on and the client has not acknowledged a
+/// response carrying it: the connection is new, the extension was switched on
+/// after the connection began, or the client is replaying from before the
+/// response that carried it.
+#[implement(Connection)]
+#[inline]
+#[must_use]
+pub fn presence_owed(&self) -> bool {
+	self.extensions.presence.enabled.unwrap_or(false)
+		&& (self.presence_base == 0 || self.presence_base > self.globalsince)
+}
+
 #[implement(Connection)]
 #[tracing::instrument(level = "debug", skip_all)]
 pub fn update_cache(&mut self, request: &Request) -> bool {
@@ -443,6 +478,10 @@ pub fn update_cache(&mut self, request: &Request) -> bool {
 	let fields_widened = Self::update_cache_extensions(request, self);
 
 	self.update_cache_profiles_owed(fields_widened);
+
+	if !self.extensions.presence.enabled.unwrap_or(false) {
+		self.presence_base = 0;
+	}
 
 	lists_changed || subscriptions_changed
 }
@@ -560,6 +599,7 @@ fn update_cache_extensions(request: &Request, cached: &mut Self) -> bool {
 	Self::update_cache_typing(&request.typing, &mut cached.typing);
 	Self::update_cache_to_device(&request.to_device, &mut cached.to_device);
 	Self::update_cache_e2ee(&request.e2ee, &mut cached.e2ee);
+	Self::update_cache_presence(&request.presence, &mut cached.presence);
 
 	Self::update_cache_profiles(&request.profiles, &mut cached.profiles)
 }
@@ -583,6 +623,11 @@ fn update_cache_typing(request: &Typing, cached: &mut Typing) {
 	some_or_sticky(request.enabled.as_ref(), &mut cached.enabled);
 	some_or_sticky(request.rooms.as_ref(), &mut cached.rooms);
 	some_or_sticky(request.lists.as_ref(), &mut cached.lists);
+}
+
+#[implement(Connection)]
+fn update_cache_presence(request: &Presence, cached: &mut Presence) {
+	some_or_sticky(request.enabled.as_ref(), &mut cached.enabled);
 }
 
 #[implement(Connection)]

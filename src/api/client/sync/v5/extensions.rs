@@ -1,5 +1,6 @@
 mod account_data;
 mod e2ee;
+mod presence;
 mod profiles;
 mod receipts;
 mod to_device;
@@ -7,7 +8,7 @@ mod typing;
 
 use std::{collections::BTreeMap, fmt::Debug};
 
-use futures::{FutureExt, future::join4};
+use futures::{FutureExt, future::join5};
 use ruma::{
 	OwnedRoomId, RoomId,
 	api::client::sync::sync_events::v5::{
@@ -87,9 +88,17 @@ pub(super) async fn handle(
 		.unwrap_or(false)
 		.then_async(|| e2ee::collect(sync_info, conn));
 
-	let (account_data, typing, to_device, e2ee) = join4(account_data, typing, to_device, e2ee)
-		.map(apply!(4, |t: Option<_>| t.unwrap_or(Ok(Default::default()))))
-		.await;
+	let presence = conn
+		.extensions
+		.presence
+		.enabled
+		.unwrap_or(false)
+		.then_async(|| presence::collect(sync_info, conn));
+
+	let (account_data, typing, to_device, e2ee, presence) =
+		join5(account_data, typing, to_device, e2ee, presence)
+			.map(apply!(5, |t: Option<_>| t.unwrap_or(Ok(Default::default()))))
+			.await;
 
 	// Receipt and room account-data payloads only exist as bounded room-range
 	// outputs, applied by `apply_ranges` after the ranges resolve.
@@ -100,6 +109,7 @@ pub(super) async fn handle(
 		to_device: to_device?,
 		e2ee: e2ee?,
 		profiles: Default::default(),
+		presence: presence?,
 	};
 
 	Ok(Collected { response, typing: typing? })

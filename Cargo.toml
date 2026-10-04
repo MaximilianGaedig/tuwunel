@@ -370,8 +370,8 @@ features = [
 ]
 
 [workspace.dependencies.ruma]
-git = "https://github.com/matrix-construct/ruma"
-rev = "fc0d9808182aa013a8f0f1b8f0e9963a89acdcfc"
+git = "https://github.com/MaximilianGaedig/ruma"
+rev = "b9e7a7451fb3c402b2dec8835e382e8fd1b38313"
 features = [
     "__compat",
     "appservice-api-c",
