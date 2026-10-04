@@ -388,70 +388,86 @@ pub async fn append_to_state(&self, new_pdu: &PduEvent) -> Result<u64> {
 	}
 
 	match &new_pdu.state_key {
-		| Some(state_key) => {
-			let states_parents = match previous_shortstatehash {
-				| Ok(p) =>
-					self.services
-						.state_compressor
-						.load_shortstatehash_info(p)
-						.await?,
-				| _ => Vec::new(),
-			};
-
-			let shortstatekey = self
-				.services
-				.short
-				.get_or_create_shortstatekey(&new_pdu.kind.to_string().into(), state_key)
-				.await;
-
-			let new = self
-				.services
-				.state_compressor
-				.compress_state_event(shortstatekey, &new_pdu.event_id)
-				.await;
-
-			let replaces = states_parents
-				.last()
-				.map(|info| {
-					info.full_state
-						.iter()
-						.find(|bytes| bytes.starts_with(&shortstatekey.to_be_bytes()))
-				})
-				.unwrap_or_default();
-
-			if Some(&new) == replaces {
-				return Ok(previous_shortstatehash.expect("must exist"));
-			}
-
-			// TODO: statehash with deterministic inputs
-			let shortstatehash = self.services.globals.next_count();
-			let mut txn = self.services.db.txn();
-
-			let mut statediffnew = CompressedState::new();
-			statediffnew.insert(new);
-
-			let mut statediffremoved = CompressedState::new();
-			if let Some(replaces) = replaces {
-				statediffremoved.insert(*replaces);
-			}
-
-			self.services
-				.state_compressor
-				.save_state_from_diff(
-					&mut txn,
-					*shortstatehash,
-					Arc::new(statediffnew),
-					Arc::new(statediffremoved),
-					2,
-					states_parents,
-				)?;
-
-			txn.execute();
-
-			Ok(*shortstatehash)
-		},
+		| Some(state_key) =>
+			self.state_with_event(previous_shortstatehash.ok(), new_pdu, state_key)
+				.await,
 		| _ => Ok(previous_shortstatehash.expect("first event in room must be a state event")),
 	}
+}
+
+/// The state `previous_shortstatehash` becomes with the state event `new_pdu` in it, in place of
+/// whatever had the same type and state key. The previous state is returned unchanged when it
+/// already holds the event.
+///
+/// The room's current state is not touched, so this also gives an imported historical event
+/// the state that follows it.
+#[implement(Service)]
+pub async fn state_with_event(
+	&self,
+	previous_shortstatehash: Option<ShortStateHash>,
+	new_pdu: &PduEvent,
+	state_key: &str,
+) -> Result<ShortStateHash> {
+	let states_parents = match previous_shortstatehash {
+		| Some(p) =>
+			self.services
+				.state_compressor
+				.load_shortstatehash_info(p)
+				.await?,
+		| _ => Vec::new(),
+	};
+
+	let shortstatekey = self
+		.services
+		.short
+		.get_or_create_shortstatekey(&new_pdu.kind.to_string().into(), state_key)
+		.await;
+
+	let new = self
+		.services
+		.state_compressor
+		.compress_state_event(shortstatekey, &new_pdu.event_id)
+		.await;
+
+	let replaces = states_parents
+		.last()
+		.map(|info| {
+			info.full_state
+				.iter()
+				.find(|bytes| bytes.starts_with(&shortstatekey.to_be_bytes()))
+		})
+		.unwrap_or_default();
+
+	if Some(&new) == replaces {
+		return Ok(previous_shortstatehash.expect("must exist"));
+	}
+
+	// TODO: statehash with deterministic inputs
+	let shortstatehash = self.services.globals.next_count();
+	let mut txn = self.services.db.txn();
+
+	let mut statediffnew = CompressedState::new();
+	statediffnew.insert(new);
+
+	let mut statediffremoved = CompressedState::new();
+	if let Some(replaces) = replaces {
+		statediffremoved.insert(*replaces);
+	}
+
+	self.services
+		.state_compressor
+		.save_state_from_diff(
+			&mut txn,
+			*shortstatehash,
+			Arc::new(statediffnew),
+			Arc::new(statediffremoved),
+			2,
+			states_parents,
+		)?;
+
+	txn.execute();
+
+	Ok(*shortstatehash)
 }
 
 /// Sets the room's current state hash without updating derived state caches.

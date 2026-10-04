@@ -81,7 +81,7 @@ static VERSIONS: [&str; 27] = [
 	"v1.19",  /* mutual rooms (MSC2666) */
 ];
 
-static UNSTABLE_FEATURES: [&str; 53] = [
+static UNSTABLE_FEATURES: [&str; 54] = [
 	// when each person was around: presence changes, events sent, typing, read receipts
 	"im.mxg.activity",
 	// the week of that log can be asked for by kind of activity (`kinds`)
@@ -107,6 +107,9 @@ static UNSTABLE_FEATURES: [&str; 53] = [
 	// /user_directory/search also asks the appservices about their own networks, and passes on the
 	// line (`im.mxg.context`) each sends to tell namesakes apart
 	"im.mxg.user_directory_search",
+	// bridges importing a chat's history with the membership of the people in it, placed before
+	// their first message there rather than at the end of the room
+	"im.mxg.batch_send_members",
 	// bridges importing a chat's history, before or after what a room has
 	"com.beeper.batch_sending",
 	"org.matrix.e2e_cross_signing",

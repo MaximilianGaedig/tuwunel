@@ -6,10 +6,14 @@
 //!
 //! The shape follows the batch-sending endpoint bridges already speak
 //! (`com.beeper.backfill`), advertised as `com.beeper.batch_sending`.
+//!
+//! Ours adds membership (`im.mxg.batch_send_members`): an `m.room.member` event
+//! with a `state_key` naming one of the bridge's own users, which goes in as
+//! history only (see `timeline::batch`).
 
 use axum::extract::State;
 use ruma::{
-	MilliSecondsSinceUnixEpoch, OwnedEventId, OwnedRoomId, OwnedUserId,
+	MilliSecondsSinceUnixEpoch, OwnedEventId, OwnedRoomId, OwnedUserId, UserId,
 	api::{auth_scheme::AccessToken, request, response},
 	events::TimelineEventType,
 	metadata,
@@ -41,6 +45,8 @@ pub struct IncomingEvent {
 	pub kind: TimelineEventType,
 	pub origin_server_ts: MilliSecondsSinceUnixEpoch,
 	pub content: Box<RawJsonValue>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub state_key: Option<String>,
 }
 
 #[request]
@@ -88,6 +94,19 @@ pub(crate) async fn batch_send_route(
 	// room: a bridge already acts as its owner through double puppeting, and the owner's own
 	// messages are part of the history it is importing.
 	for event in &body.events {
+		if let Some(state_key) = &event.state_key {
+			// Historical membership of the bridge's own users, nothing else: other state in
+			// the past would say what a room was like without the room having been so.
+			let own_user = UserId::parse(state_key.as_str())
+				.is_ok_and(|user_id| appservice.is_user_match(&user_id));
+
+			if event.kind != TimelineEventType::RoomMember || !own_user {
+				return Err!(Request(InvalidParam(
+					"Only the membership of the application service's own users can be imported."
+				)));
+			}
+		}
+
 		if appservice.is_user_match(&event.sender) {
 			continue;
 		}
@@ -118,6 +137,7 @@ pub(crate) async fn batch_send_route(
 			kind: event.kind.clone(),
 			origin_server_ts: event.origin_server_ts,
 			content: event.content.clone(),
+			state_key: event.state_key.clone(),
 		})
 		.collect();
 
