@@ -110,6 +110,14 @@ pub struct Room {
 	/// Fingerprints of the required-state selectors last delivered for this room.
 	#[serde(default)]
 	pub required_state: RequiredState,
+	/// Position of the response that delivered the configuration above.
+	///
+	/// A client resuming from this position or a later one holds the room's
+	/// state as configured, so a replay only sends what changed since its
+	/// position. Zero means unknown, as on connections stored before it was
+	/// kept, and a replay then sends the room in full.
+	#[serde(default)]
+	pub config_since: u64,
 }
 
 /// Fingerprints of delivered required-state selectors.
@@ -370,15 +378,25 @@ pub fn store(&self, service: &Service, key: &ConnectionKey) {
 #[implement(Connection)]
 #[tracing::instrument(level = "debug", skip(self))]
 pub fn update_rooms_prologue(&mut self, retard_since: Option<u64>) {
-	self.rooms.values_mut().for_each(|room| {
-		if let Some(retard_since) = retard_since
-			&& room.roomsince > retard_since
-		{
+	let Some(retard_since) = retard_since else {
+		return;
+	};
+
+	self.rooms
+		.values_mut()
+		.filter(|room| room.roomsince > retard_since)
+		.for_each(|room| {
 			room.roomsince = retard_since;
-			room.config_hash = 0;
-			room.required_state.clear();
-		}
-	});
+
+			// The client at `retard_since` has the room as configured when the
+			// configuration was delivered at or before it; it is only owed
+			// what happened since. Otherwise it is owed the room in full.
+			if room.config_since == 0 || room.config_since > retard_since {
+				room.config_hash = 0;
+				room.required_state.clear();
+				room.config_since = 0;
+			}
+		});
 }
 
 /// Advance the per-room cursor for each complete bounded room range.
@@ -398,6 +416,13 @@ where
 
 		room.roomsince = next_batch;
 		if let Some((config_hash, required_state)) = config {
+			if room.config_since == 0
+				|| room.config_hash != config_hash
+				|| room.required_state != required_state
+			{
+				room.config_since = next_batch;
+			}
+
 			room.config_hash = config_hash;
 			room.required_state = required_state;
 		}

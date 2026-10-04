@@ -128,12 +128,14 @@ fn epilogue_advances_only_complete_ranges() {
 		roomsince: 3,
 		config_hash: 11,
 		required_state: [2, 4].into_iter().collect(),
+		..Default::default()
 	};
 
 	let incomplete_room = Room {
 		roomsince: 3,
 		config_hash: 12,
 		required_state: [3, 5].into_iter().collect(),
+		..Default::default()
 	};
 
 	let mut conn = Connection {
@@ -173,12 +175,14 @@ fn prologue_rewinds_a_complete_range_for_replay() {
 		roomsince: 9,
 		config_hash: 17,
 		required_state: [2, 4].into_iter().collect(),
+		..Default::default()
 	};
 
 	let retained_room = Room {
 		roomsince: 4,
 		config_hash: 18,
 		required_state: [3, 5].into_iter().collect(),
+		..Default::default()
 	};
 
 	let mut conn = Connection {
@@ -194,6 +198,58 @@ fn prologue_rewinds_a_complete_range_for_replay() {
 	assert_eq!(conn.rooms[retained].roomsince, 4);
 	assert_eq!(conn.rooms[retained].config_hash, 18);
 	assert_eq!(conn.rooms[retained].required_state.as_slice(), &[3, 5]);
+}
+
+/// A client resuming from an older position it was answered at holds every
+/// room whose configuration was delivered by then: only what changed since
+/// is owed. A room configured after that position is owed in full.
+#[test]
+fn prologue_keeps_a_configuration_delivered_before_the_replayed_position() {
+	let held = room_id!("!held:example.com");
+	let newer = room_id!("!newer:example.com");
+	let mut conn = Connection { next_batch: 10, ..Default::default() };
+
+	conn.update_rooms_epilogue(once((held, Some((17, [2, 4].into_iter().collect())))));
+	conn.next_batch = 20;
+	conn.update_rooms_epilogue(
+		[
+			(held, Some((17, [2, 4].into_iter().collect()))),
+			(newer, Some((18, [3].into_iter().collect()))),
+		]
+		.into_iter(),
+	);
+
+	assert_eq!(
+		conn.rooms[held].config_since, 10,
+		"an unchanged configuration keeps its position"
+	);
+	assert_eq!(conn.rooms[newer].config_since, 20);
+
+	conn.update_rooms_prologue(Some(15));
+
+	assert_eq!(conn.rooms[held].roomsince, 15);
+	assert_eq!(conn.rooms[held].config_hash, 17);
+	assert_eq!(conn.rooms[held].required_state.as_slice(), &[2, 4]);
+	assert_eq!(conn.rooms[newer].roomsince, 15);
+	assert_eq!(conn.rooms[newer].config_hash, 0);
+	assert!(conn.rooms[newer].required_state.is_empty());
+}
+
+#[test]
+fn epilogue_moves_the_configuration_position_when_it_changes() {
+	let room = room_id!("!changed:example.com");
+	let mut conn = Connection { next_batch: 10, ..Default::default() };
+
+	conn.update_rooms_epilogue(once((room, Some((17, once(2).collect())))));
+	conn.next_batch = 20;
+	conn.update_rooms_epilogue(once((room, Some((17, [2, 4].into_iter().collect())))));
+
+	assert_eq!(conn.rooms[room].config_since, 20);
+
+	conn.update_rooms_prologue(Some(15));
+
+	assert_eq!(conn.rooms[room].config_hash, 0);
+	assert!(conn.rooms[room].required_state.is_empty());
 }
 
 #[test]
@@ -317,6 +373,7 @@ fn epilogue_leaves_configuration_for_extension_only_range() {
 		roomsince: 3,
 		config_hash: 19,
 		required_state: [2, 4].into_iter().collect(),
+		..Default::default()
 	};
 
 	let mut conn = Connection {
@@ -583,6 +640,7 @@ fn connection_cbor_preserves_required_state_and_allows_downgrade() {
 		roomsince: 7,
 		config_hash: 19,
 		required_state: (1..=32).collect(),
+		..Default::default()
 	};
 
 	let conn = Connection {
