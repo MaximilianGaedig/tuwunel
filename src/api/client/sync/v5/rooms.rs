@@ -17,7 +17,8 @@ use ruma::{
 		v5::{DisplayName, response, response::Heroes},
 	},
 	events::{
-		AnySyncStateEvent, StateEventType, TimelineEventType, room::member::MembershipState,
+		AnySyncStateEvent, AnySyncTimelineEvent, StateEventType, TimelineEventType,
+		room::member::MembershipState,
 	},
 	serde::Raw,
 };
@@ -49,6 +50,7 @@ use self::{bump_stamp::room_bump_stamp, heroes::calculate_heroes};
 use super::{
 	super::{load_timeline_fallible, strip_prev_state},
 	Connection, ListIds, SyncInfo, WindowRoom,
+	activity::{is_preview_pdu, newest_said_event},
 };
 use crate::client::{annotate_membership, ignored_filter, with_membership};
 
@@ -155,6 +157,21 @@ pub(super) async fn handle_room(
 	.map_err(Failure::Timeline)
 	.await?;
 
+	let preview = is_invite
+		.is_false()
+		.then_async(|| {
+			room_preview(
+				services,
+				sender_user,
+				room_id,
+				roomsince,
+				PduCount::from(conn.next_batch),
+				&timeline_pdus,
+			)
+		})
+		.await
+		.flatten();
+
 	let mode = state_mode(roomsince, room.required_state.is_empty());
 	let state = StateSelection {
 		mode,
@@ -244,6 +261,7 @@ pub(super) async fn handle_room(
 		limited,
 		timeline,
 		bump_stamp,
+		preview,
 		joined_count,
 		invited_count,
 		unread_notifications: merge_unread_notifications(
@@ -252,6 +270,44 @@ pub(super) async fn handle_room(
 			&thread_counts,
 		),
 	})
+}
+
+/// The room's newest message for the list's preview (`im.mxg.preview`), when the timeline being sent
+/// shows none: a list that asks for one event per room gets a reaction or a bridge's delivery status
+/// there as often as not. Only looked for then, and only when the client cannot have it yet.
+async fn room_preview(
+	services: &Services,
+	sender_user: &UserId,
+	room_id: &RoomId,
+	roomsince: u64,
+	next_batch: PduCount,
+	timeline: &[(PduCount, PduEvent)],
+) -> Option<Raw<AnySyncTimelineEvent>> {
+	if timeline
+		.iter()
+		.any(|(_, pdu)| is_preview_pdu(pdu, sender_user))
+	{
+		return None;
+	}
+
+	let (count, pdu) = newest_said_event(services, sender_user, room_id, next_batch)
+		.await
+		.ok()
+		.flatten()?;
+
+	if !preview_is_new(roomsince, count) {
+		return None;
+	}
+
+	ignored_filter(services, (count, pdu), sender_user)
+		.await
+		.map(|(_, pdu)| Event::into_format(pdu))
+}
+
+/// Whether the client may not have this preview yet: the room is new to the connection, or the
+/// message came after what the connection has already sent.
+pub(super) fn preview_is_new(roomsince: u64, preview: PduCount) -> bool {
+	roomsince == 0 || preview > PduCount::Normal(roomsince)
 }
 
 async fn leave_or_ban_response(

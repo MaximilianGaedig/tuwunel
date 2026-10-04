@@ -58,6 +58,36 @@ pub(super) async fn newest_said(
 		.await
 }
 
+/// The room's newest message up to `until`, with its position, for a room list's preview: the event
+/// `newest_said` dates the room by, among the room's latest events. Not an invite, which a room list
+/// shows by itself.
+pub(super) async fn newest_said_event(
+	services: &Services,
+	sender_user: &UserId,
+	room_id: &RoomId,
+	until: PduCount,
+) -> Result<Option<(PduCount, PduEvent)>> {
+	services
+		.timeline
+		.pdus_rev(Some(sender_user), room_id, Some(until.saturating_add(1)))
+		.take(SCAN)
+		.ready_try_filter_map(|(count, pdu)| {
+			Ok(is_preview_pdu(&pdu, sender_user).then_some((count, pdu)))
+		})
+		.try_fold(None, |newest: Option<(PduCount, PduEvent)>, (count, pdu)| {
+			let newer = newest
+				.as_ref()
+				.is_none_or(|(_, seen)| pdu.origin_server_ts() > seen.origin_server_ts());
+			ready(Ok(if newer { Some((count, pdu)) } else { newest }))
+		})
+		.await
+}
+
+/// Whether an event can be a room's preview: a message, as for the list's order, but not a membership.
+pub(super) fn is_preview_pdu(pdu: &PduEvent, sender_user: &UserId) -> bool {
+	*pdu.event_type() != TimelineEventType::RoomMember && is_bumpable_pdu(pdu, sender_user)
+}
+
 /// Per user and room: the stream position it was worked out at, and the time.
 type Known = HashMap<(OwnedUserId, OwnedRoomId), (PduCount, u64)>;
 static KNOWN: LazyLock<Mutex<Known>> = LazyLock::new(Default::default);
@@ -154,7 +184,7 @@ mod tests {
 	use serde_json::{json, value::to_raw_value};
 	use tuwunel_core::matrix::{StateKey, pdu::PduEvent};
 
-	use super::{DEFAULT_BUMP_TYPES, is_bumpable_pdu};
+	use super::{DEFAULT_BUMP_TYPES, is_bumpable_pdu, is_preview_pdu};
 
 	fn pdu(kind: TimelineEventType, state_key: Option<StateKey>, redacted: bool) -> PduEvent {
 		pdu_with(kind, state_key, redacted, json!({}))
@@ -226,6 +256,25 @@ mod tests {
 	}
 
 	// A bridge joining the user to a portal for an old chat is not news.
+	#[test]
+	fn messages_are_previews_and_reactions_and_invites_are_not() {
+		let sender = user_id!("@alice:example.com");
+
+		assert!(is_preview_pdu(&pdu(TimelineEventType::RoomMessage, None, false), sender));
+		assert!(!is_preview_pdu(&pdu(TimelineEventType::Reaction, None, false), sender));
+		assert!(!is_preview_pdu(&pdu(TimelineEventType::RoomMessage, None, true), sender));
+
+		// An invite orders the list but is not a message to show beside it.
+		let invite = pdu_with(
+			TimelineEventType::RoomMember,
+			Some(sender.as_str().into()),
+			false,
+			json!({ "membership": "invite" }),
+		);
+		assert!(is_bumpable_pdu(&invite, sender));
+		assert!(!is_preview_pdu(&invite, sender));
+	}
+
 	#[test]
 	fn own_join_does_not_bump() {
 		let sender = user_id!("@alice:example.com");
