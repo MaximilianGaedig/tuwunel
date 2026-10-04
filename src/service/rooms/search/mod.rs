@@ -34,9 +34,10 @@ pub struct Service {
 	services: Arc<crate::services::OnceServices>,
 }
 
+/// A search of one or more rooms, paged across all of them.
 #[derive(Clone, Debug)]
 pub struct RoomQuery<'a> {
-	pub room_id: &'a RoomId,
+	pub room_ids: &'a [&'a RoomId],
 	pub user_id: Option<&'a UserId>,
 	pub criteria: &'a Criteria,
 	pub limit: usize,
@@ -132,8 +133,12 @@ impl crate::Service for Service {
 		match startup_action(stored, !self.engine.is_empty()) {
 			| Startup::Current => {},
 			| Startup::Adopt => {
-				info!(current = INDEX_VERSION, "Recording the version of the existing search index");
-				self.global.raw_put(INDEX_VERSION_KEY, INDEX_VERSION);
+				info!(
+					current = INDEX_VERSION,
+					"Recording the version of the existing search index"
+				);
+				self.global
+					.raw_put(INDEX_VERSION_KEY, INDEX_VERSION);
 			},
 			| Startup::Rebuild => {
 				info!(?stored, current = INDEX_VERSION, "Indexing existing history for search");
@@ -141,7 +146,8 @@ impl crate::Service for Service {
 				self.server.runtime().spawn(async move {
 					match this.rebuild_words().await {
 						| Ok(indexed) => info!("Indexed the words of {indexed} messages."),
-						| Err(e) if !this.server.is_running() => info!("Search indexing stopped: {e}"),
+						| Err(e) if !this.server.is_running() =>
+							info!("Search indexing stopped: {e}"),
 						| Err(e) => error!("Rebuilding the search index failed: {e}"),
 					}
 				});
@@ -216,7 +222,12 @@ pub async fn rebuild_words(&self) -> Result<usize> {
 	let mut indexed: usize = 0;
 	for room_id in rooms {
 		self.server.check_running()?;
-		let Ok(shortroomid) = self.services.short.get_shortroomid(&room_id).await else {
+		let Ok(shortroomid) = self
+			.services
+			.short
+			.get_shortroomid(&room_id)
+			.await
+		else {
 			continue;
 		};
 
@@ -239,7 +250,8 @@ pub async fn rebuild_words(&self) -> Result<usize> {
 	// The worker's timer has been committing all along; this is the remainder, and it has to be
 	// on disk before the version says the history is whole.
 	self.engine.commit()?;
-	self.global.raw_put(INDEX_VERSION_KEY, INDEX_VERSION);
+	self.global
+		.raw_put(INDEX_VERSION_KEY, INDEX_VERSION);
 
 	Ok(indexed)
 }
@@ -264,7 +276,13 @@ fn searchable_text(kind: &TimelineEventType, content: &str) -> Option<String> {
 	}
 }
 
-/// The page of a room's messages matching the query, and how many matched in total.
+/// The page of messages matching the query in any of its rooms, newest first across all of them,
+/// and how many matched in total.
+///
+/// One search over the set, not one per room: `limit` is the size of the whole page and `skip` an
+/// offset into the whole result, so paging walks one list without repeating or skipping anything,
+/// and a search of every room an account is in costs one index walk however many rooms that is.
+/// Rooms the server does not know are left out.
 ///
 /// The count is every match, not the size of the page, so a client can say which of how many it is
 /// showing and step through them. It counts what the index matched rather than what survives the
@@ -275,11 +293,19 @@ pub async fn search_pdus<'a>(
 	&'a self,
 	query: &'a RoomQuery<'a>,
 ) -> Result<(usize, impl Stream<Item = impl Event + use<>> + Send + '_)> {
-	let shortroomid = self
-		.services
-		.short
-		.get_shortroomid(query.room_id)
-		.await?;
+	let shortroomids: Vec<ShortRoomId> = query
+		.room_ids
+		.iter()
+		.stream()
+		.wide_filter_map(async |room_id| {
+			self.services
+				.short
+				.get_shortroomid(room_id)
+				.await
+				.ok()
+		})
+		.collect()
+		.await;
 
 	let want = query
 		.skip
@@ -288,8 +314,10 @@ pub async fn search_pdus<'a>(
 
 	let found = self
 		.engine
-		.search(shortroomid, &query.criteria.search_term, 0, want)?;
+		.search(&shortroomids, &query.criteria.search_term, 0, want)?;
 
+	// What the index found, in its order, less what is redacted, filtered out or not visible to
+	// the reader. The offset is applied after those drops, so it counts results the reader got.
 	let filter = &query.criteria.filter;
 	let pdus = found
 		.pdus
@@ -417,7 +445,11 @@ mod tests {
 
 		let service = &fixture.services.search;
 		let engine = &service.engine;
-		let found = || engine.search(1, "hello", 0, 10).map(|found| found.count);
+		let found = || {
+			engine
+				.search(&[1], "hello", 0, 10)
+				.map(|found| found.count)
+		};
 
 		service.index_pdu(1, &pdu_id(1), "hello there");
 		assert_eq!(found()?, 0, "found before it was committed");
