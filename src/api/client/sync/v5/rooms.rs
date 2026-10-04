@@ -111,11 +111,15 @@ pub(super) async fn handle_room(
 
 	let is_invite = *membership == Some(MembershipState::Invite);
 
+	// Outside the room: stripped state at most, and no timeline or preview. A knock
+	// gives no right to read the room.
+	let is_outside = membership_is_outside(membership.as_ref());
+
 	let encrypted = services.state_accessor.is_encrypted_room(room_id);
 
 	let (timeline_limit, required_state) = room_details;
 
-	let timeline = is_invite.is_false().then_async(|| {
+	let timeline = is_outside.is_false().then_async(|| {
 		load_timeline_fallible(
 			services,
 			sender_user,
@@ -157,7 +161,7 @@ pub(super) async fn handle_room(
 	.map_err(Failure::Timeline)
 	.await?;
 
-	let preview = is_invite
+	let preview = is_outside
 		.is_false()
 		.then_async(|| {
 			room_preview(
@@ -195,11 +199,20 @@ pub(super) async fn handle_room(
 	);
 
 	// TODO: figure out a timestamp we can use for remote invites
-	let invite_state = is_invite.then_async(|| {
-		services
-			.state_cache
-			.invite_state(sender_user, room_id)
-			.ok()
+	// A knock's stripped state goes in `invite_state` too, as Synapse sends it.
+	let invite_state = is_outside.then_async(|| async move {
+		match is_invite {
+			| true => services
+				.state_cache
+				.invite_state(sender_user, room_id)
+				.await
+				.ok(),
+			| false => services
+				.state_cache
+				.knock_state(sender_user, room_id)
+				.await
+				.ok(),
+		}
 	});
 
 	let timeline = timeline_pdus
@@ -240,7 +253,7 @@ pub(super) async fn handle_room(
 	)
 	.await;
 
-	let previous_connection_pos = previous_connection_pos.filter(|_| !is_invite);
+	let previous_connection_pos = previous_connection_pos.filter(|_| !is_outside);
 	let (initial, num_live) =
 		room_timeline_metadata(roomsince, previous_connection_pos, &timeline);
 
@@ -388,6 +401,11 @@ fn digest_word(digest: Sha256Digest) -> u64 {
 			.try_into()
 			.expect("SHA-256 digest must contain eight bytes"),
 	)
+}
+
+/// Whether we are outside a room with this membership: invited or knocking.
+pub(super) fn membership_is_outside(membership: Option<&MembershipState>) -> bool {
+	matches!(membership, Some(MembershipState::Invite | MembershipState::Knock))
 }
 
 pub(super) fn membership_allows_required_state(membership: Option<&MembershipState>) -> bool {
