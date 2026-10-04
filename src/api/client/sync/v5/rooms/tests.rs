@@ -9,9 +9,10 @@ use ruma::{
 use tuwunel_core::matrix::pdu::PduCount;
 
 use super::{
-	StateMode, membership_allows_required_state, preview_is_new, required_state_hash,
-	room_config, room_timeline_limited, room_timeline_metadata, state_is_required,
-	state_may_have_changed, state_mode, state_was_requested,
+	StateMode, every_type_selects, is_every_type, membership_allows_required_state,
+	preview_is_new, required_state_hash, room_config, room_timeline_limited,
+	room_timeline_metadata, state_is_required, state_may_have_changed, state_mode,
+	state_was_requested,
 };
 
 #[test]
@@ -219,4 +220,48 @@ fn timeline(positions: &[u64]) -> Vec<(PduCount, ())> {
 		.copied()
 		.map(|position| (PduCount::Normal(position), ()))
 		.collect()
+}
+
+#[test]
+fn every_type_wildcard_is_recognised() {
+	assert!(is_every_type(&StateEventType::from("*")));
+	assert!(!is_every_type(&StateEventType::RoomMember));
+}
+
+#[test]
+fn every_type_wildcard_selects_by_state_key() {
+	let me = user_id!("@me:example.com");
+
+	assert!(every_type_selects(&["*"], me, "@other:example.com"));
+	assert!(every_type_selects(&["*"], me, ""));
+	assert!(every_type_selects(&[""], me, ""));
+	assert!(!every_type_selects(&[""], me, "@other:example.com"));
+	assert!(every_type_selects(&["$ME"], me, "@me:example.com"));
+	assert!(!every_type_selects(&["$ME"], me, "@other:example.com"));
+	assert!(!every_type_selects(&["$LAZY"], me, "@other:example.com"));
+	assert!(!every_type_selects(&[], me, ""));
+}
+
+#[test]
+fn every_type_wildcard_counts_as_already_requested() {
+	let me = user_id!("@me:example.com");
+	let previous = [required_state_hash(&StateEventType::from("*"), "*")];
+
+	assert!(state_was_requested(&previous, &StateEventType::RoomTopic, "", me));
+	assert!(state_was_requested(
+		&previous,
+		&StateEventType::RoomMember,
+		"@other:example.com",
+		me
+	));
+
+	let only_empty_keys = [required_state_hash(&StateEventType::from("*"), "")];
+
+	assert!(state_was_requested(&only_empty_keys, &StateEventType::RoomTopic, "", me));
+	assert!(!state_was_requested(
+		&only_empty_keys,
+		&StateEventType::RoomMember,
+		"@other:example.com",
+		me
+	));
 }
