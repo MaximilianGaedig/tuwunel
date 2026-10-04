@@ -11,8 +11,28 @@ use tuwunel_core::matrix::pdu::PduCount;
 use super::{
 	StateMode, membership_allows_required_state, preview_is_new, required_state_hash,
 	room_config, room_timeline_limited, room_timeline_metadata, state_is_required,
-	state_may_have_changed, state_mode, state_was_requested,
+	state_may_have_changed, state_mode, state_was_requested, timeline_from_message_start,
 };
+
+#[test]
+fn timeline_from_message_starts_at_the_newest_message() {
+	let is_message = |kind: &&str| *kind == "message";
+
+	// A message, then the reactions and delivery statuses after it: those before it are left out.
+	assert_eq!(
+		timeline_from_message_start(
+			&["message", "status", "message", "reaction", "status"],
+			is_message
+		),
+		2
+	);
+	// Already starting at it, or ending with it.
+	assert_eq!(timeline_from_message_start(&["message", "status"], is_message), 0);
+	assert_eq!(timeline_from_message_start(&["status", "message"], is_message), 1);
+	// No message among them: all of them, as without the option.
+	assert_eq!(timeline_from_message_start(&["status", "reaction"], is_message), 0);
+	assert_eq!(timeline_from_message_start::<&str>(&[], is_message), 0);
+}
 
 #[test]
 fn preview_is_sent_to_a_new_room_or_when_newer_than_what_was_sent() {

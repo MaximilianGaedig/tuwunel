@@ -133,10 +133,29 @@ pub(super) async fn handle_room(
 	let (encrypted, timeline) = join(encrypted, timeline).await;
 
 	// A failed load must fail the room, else roomsince advances past unsent events.
-	let (timeline_pdus, limited, last_timeline_count) =
+	let (mut timeline_pdus, limited, last_timeline_count) =
 		timeline?.unwrap_or_else(|| (Vec::new(), false, PduCount::default()));
 
-	let limited = room_timeline_limited(timeline_limit, limited);
+	let mut limited = room_timeline_limited(timeline_limit, limited);
+
+	// A list that asked for each room's timeline to start at its newest message
+	// (`im.mxg.timeline_from_message`) gets the events before it left out when the room is
+	// described afresh: new to the connection, or after a gap the client starts again from.
+	// Later updates carry on from what was sent and are never cut.
+	let from_message = lists
+		.iter()
+		.filter_map(|list_id| conn.lists.get(list_id))
+		.any(|list| list.room_details.timeline_from_message);
+
+	if from_message && (roomsince == 0 || limited) {
+		let start = timeline_from_message_start(&timeline_pdus, |(_, pdu)| {
+			is_preview_pdu(pdu, sender_user)
+		});
+		if start > 0 {
+			timeline_pdus.drain(..start);
+			limited = true;
+		}
+	}
 
 	// Signed: history a bridge imported is counted below 0, and as unsigned its
 	// token was a number paginating could not read back.
@@ -302,6 +321,15 @@ async fn room_preview(
 	ignored_filter(services, (count, pdu), sender_user)
 		.await
 		.map(|(_, pdu)| Event::into_format(pdu))
+}
+
+/// Where a timeline that starts at its newest message starts: at the last message among the loaded
+/// events, or at the first event when none of them is one.
+pub(super) fn timeline_from_message_start<E>(
+	events: &[E],
+	is_message: impl Fn(&E) -> bool,
+) -> usize {
+	events.iter().rposition(is_message).unwrap_or(0)
 }
 
 /// Whether the client may not have this preview yet: the room is new to the connection, or the

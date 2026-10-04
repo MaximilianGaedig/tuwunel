@@ -259,6 +259,25 @@ fn update_cache_copies_changed_timeline_limit() {
 }
 
 #[test]
+fn update_cache_copies_timeline_from_message() {
+	let mut conn = Connection::default();
+	let mut list = list_with_timeline_limit(10);
+
+	assert!(conn.update_cache(&request_with_list(list.clone())));
+	assert!(!conn.update_cache(&request_with_list(list.clone())));
+
+	list.room_details.timeline_from_message = true;
+	assert!(conn.update_cache(&request_with_list(list)));
+
+	let cached = conn
+		.lists
+		.get(&list_id())
+		.expect("list must be cached");
+
+	assert!(cached.room_details.timeline_from_message);
+}
+
+#[test]
 fn update_cache_detects_changed_required_state() {
 	let mut conn = Connection::default();
 	let room_name = vec![(StateEventType::RoomName, "".into())];

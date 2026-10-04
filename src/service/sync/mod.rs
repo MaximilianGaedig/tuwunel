@@ -513,6 +513,9 @@ fn update_cache_list(request: &request::List, cached: &mut request::List) -> boo
 	let timeline_limit_changed =
 		request.room_details.timeline_limit != cached.room_details.timeline_limit;
 
+	let timeline_from_message_changed =
+		request.room_details.timeline_from_message != cached.room_details.timeline_from_message;
+
 	let required_state_changed = !request.room_details.required_state.is_empty()
 		&& request.room_details.required_state != cached.room_details.required_state;
 
@@ -523,14 +526,18 @@ fn update_cache_list(request: &request::List, cached: &mut request::List) -> boo
 			.is_none_or(|cached| !list_filters_are_equal(request, cached))
 	});
 
-	let changed =
-		ranges_changed || timeline_limit_changed || required_state_changed || filters_changed;
+	let changed = ranges_changed
+		|| timeline_limit_changed
+		|| timeline_from_message_changed
+		|| required_state_changed
+		|| filters_changed;
 
 	if ranges_changed {
 		cached.ranges.clone_from(&request.ranges);
 	}
 
 	cached.room_details.timeline_limit = request.room_details.timeline_limit;
+	cached.room_details.timeline_from_message = request.room_details.timeline_from_message;
 
 	if required_state_changed {
 		cached
@@ -571,6 +578,7 @@ fn subscriptions_are_equal(request: &Subscriptions, cached: &Subscriptions) -> b
 
 fn list_config_is_equal(request: &request::ListConfig, cached: &request::ListConfig) -> bool {
 	request.timeline_limit == cached.timeline_limit
+		&& request.timeline_from_message == cached.timeline_from_message
 		&& request.required_state == cached.required_state
 }
 
