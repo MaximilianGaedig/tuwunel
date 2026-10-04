@@ -161,8 +161,13 @@ pub(crate) async fn sync_events_v5_route(
 		debug_warn!(?conn_key, "Client cleared cache and reloaded.");
 	}
 
+	// Any earlier position this connection answered can be resumed from: the
+	// per-room configuration positions say what a client there holds, so it is
+	// sent only what changed since. A later position stays valid as well, so a
+	// reload resuming from a slightly old saved position does not cost another
+	// tab or request its own.
 	let advancing = since == conn.next_batch;
-	let retarding = since != 0 && since <= conn.globalsince;
+	let retarding = is_retarding(since, conn.next_batch);
 	if !advancing && !retarding {
 		return Err!(Request(UnknownPos(warn!(
 			"Requesting unknown or invalid stream position."
@@ -305,13 +310,26 @@ fn config_change_needs_position(
 	config_changed && advancing && caught_up && since != 0
 }
 
+/// Whether `since` is an earlier position of a connection whose latest is
+/// `next_batch`.
+fn is_retarding(since: u64, next_batch: u64) -> bool { since != 0 && since < next_batch }
+
 fn is_empty_response(response: &Response) -> bool {
 	response.extensions.is_empty() && response.rooms.is_empty()
 }
 
 #[cfg(test)]
 mod tests {
-	use super::config_change_needs_position;
+	use super::{config_change_needs_position, is_retarding};
+
+	#[test]
+	fn every_earlier_position_can_be_resumed() {
+		assert!(is_retarding(5, 9), "a position between the last two responses");
+		assert!(is_retarding(8, 9));
+		assert!(!is_retarding(9, 9), "the latest position advances");
+		assert!(!is_retarding(10, 9), "a position never handed out");
+		assert!(!is_retarding(0, 9), "zero starts over");
+	}
 
 	#[test]
 	fn caught_up_advancing_config_change_needs_position() {
