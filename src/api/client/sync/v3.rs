@@ -961,14 +961,33 @@ pub(super) async fn process_presence_updates(
 	syncing_user: &UserId,
 	filter: &FilterDefinition,
 ) -> PresenceUpdates {
+	// Whether the syncing user shares a room with someone is asked of every
+	// presence row, and user_sees_user read all of the syncing user's rooms
+	// again for each: with bridges, thousands of rows times every joined room,
+	// seconds for a first sync. Their rooms are read once here, and each row
+	// reads only its own user's, who is in a few.
+	let syncing_rooms: HashSet<OwnedRoomId> = services
+		.state_cache
+		.rooms_joined(syncing_user)
+		.map(ToOwned::to_owned)
+		.collect()
+		.await;
+	let syncing_rooms = &syncing_rooms;
+
 	services
 		.presence
 		.presence_since(since, Some(next_batch))
 		.ready_filter(|(user_id, ..)| filter.presence.matches(user_id))
-		.filter(|(user_id, ..)| {
-			services
-				.state_cache
-				.user_sees_user(syncing_user, user_id)
+		.filter(move |(user_id, ..)| {
+			let user_id: &UserId = *user_id;
+			async move {
+				user_id == syncing_user
+					|| services
+						.state_cache
+						.rooms_joined(user_id)
+						.ready_any(|room_id| syncing_rooms.contains(room_id))
+						.await
+			}
 		})
 		.filter_map(|(user_id, _, presence_bytes)| {
 			services
