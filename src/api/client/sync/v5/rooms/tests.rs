@@ -10,9 +10,9 @@ use tuwunel_core::matrix::pdu::PduCount;
 
 use super::{
 	StateMode, every_type_selects, is_every_type, membership_allows_required_state,
-	preview_is_new, required_state_hash, room_config, room_timeline_limited,
-	room_timeline_metadata, state_is_required, state_may_have_changed, state_mode,
-	state_was_requested,
+	membership_is_outside, preview_is_new, required_state_hash, room_config,
+	room_timeline_limited, room_timeline_metadata, state_is_required, state_may_have_changed,
+	state_mode, state_was_requested,
 };
 
 #[test]
@@ -264,4 +264,13 @@ fn every_type_wildcard_counts_as_already_requested() {
 		"@other:example.com",
 		me
 	));
+}
+
+#[test]
+fn invites_and_knocks_are_outside_the_room() {
+	assert!(membership_is_outside(Some(&MembershipState::Invite)));
+	assert!(membership_is_outside(Some(&MembershipState::Knock)));
+	assert!(!membership_is_outside(Some(&MembershipState::Join)));
+	assert!(!membership_is_outside(Some(&MembershipState::Leave)));
+	assert!(!membership_is_outside(None));
 }
