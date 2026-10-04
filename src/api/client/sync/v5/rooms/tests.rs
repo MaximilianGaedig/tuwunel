@@ -9,10 +9,21 @@ use ruma::{
 use tuwunel_core::matrix::pdu::PduCount;
 
 use super::{
-	StateMode, membership_allows_required_state, required_state_hash, room_config,
-	room_timeline_limited, room_timeline_metadata, state_is_required, state_may_have_changed,
-	state_mode, state_was_requested,
+	StateMode, membership_allows_required_state, preview_is_new, required_state_hash,
+	room_config, room_timeline_limited, room_timeline_metadata, state_is_required,
+	state_may_have_changed, state_mode, state_was_requested,
 };
+
+#[test]
+fn preview_is_sent_to_a_new_room_or_when_newer_than_what_was_sent() {
+	// A room new to the connection gets its preview, even one a bridge imported (counted below 0).
+	assert!(preview_is_new(0, PduCount::Normal(5)));
+	assert!(preview_is_new(0, PduCount::Backfilled(-3)));
+	// After that only a message that came since.
+	assert!(preview_is_new(10, PduCount::Normal(11)));
+	assert!(!preview_is_new(10, PduCount::Normal(10)));
+	assert!(!preview_is_new(10, PduCount::Normal(4)));
+}
 
 #[test]
 fn first_connection_timeline_is_initial_and_historical() {

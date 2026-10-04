@@ -93,6 +93,9 @@ static UNSTABLE_FEATURES: [&str; 52] = [
 	// presence in simplified sliding sync, as the `im.mxg.presence` extension, in place of a
 	// second `/sync` long-poll
 	"im.mxg.msc4186.presence",
+	// each sliding sync room's newest message (`im.mxg.preview`) when its timeline does not show
+	// one, so room lists can ask for a single event
+	"im.mxg.msc4186.preview",
 	// what media says: text read off a picture, what a voice message said
 	"im.mxg.media_text",
 	// per-room message counts, by kind and by sender

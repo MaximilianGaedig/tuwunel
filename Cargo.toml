@@ -371,7 +371,7 @@ features = [
 
 [workspace.dependencies.ruma]
 git = "https://github.com/MaximilianGaedig/ruma"
-rev = "b9e7a7451fb3c402b2dec8835e382e8fd1b38313"
+rev = "50a189e291b9bb09bdd214448bd66f48c009a72f"
 features = [
     "__compat",
     "appservice-api-c",
@@ -655,17 +655,17 @@ default-features = false
 # synapse-admin-api depends on matrix-construct's ruma; the one fork of it that has the
 # im.mxg.presence extension types has to be the only copy in the graph.
 [patch."https://github.com/matrix-construct/ruma"]
-ruma = { git = "https://github.com/MaximilianGaedig/ruma", rev = "b9e7a7451fb3c402b2dec8835e382e8fd1b38313" }
-ruma-appservice-api = { git = "https://github.com/MaximilianGaedig/ruma", rev = "b9e7a7451fb3c402b2dec8835e382e8fd1b38313" }
-ruma-client-api = { git = "https://github.com/MaximilianGaedig/ruma", rev = "b9e7a7451fb3c402b2dec8835e382e8fd1b38313" }
-ruma-common = { git = "https://github.com/MaximilianGaedig/ruma", rev = "b9e7a7451fb3c402b2dec8835e382e8fd1b38313" }
-ruma-events = { git = "https://github.com/MaximilianGaedig/ruma", rev = "b9e7a7451fb3c402b2dec8835e382e8fd1b38313" }
-ruma-federation-api = { git = "https://github.com/MaximilianGaedig/ruma", rev = "b9e7a7451fb3c402b2dec8835e382e8fd1b38313" }
-ruma-identifiers-validation = { git = "https://github.com/MaximilianGaedig/ruma", rev = "b9e7a7451fb3c402b2dec8835e382e8fd1b38313" }
-ruma-identity-service-api = { git = "https://github.com/MaximilianGaedig/ruma", rev = "b9e7a7451fb3c402b2dec8835e382e8fd1b38313" }
-ruma-macros = { git = "https://github.com/MaximilianGaedig/ruma", rev = "b9e7a7451fb3c402b2dec8835e382e8fd1b38313" }
-ruma-push-gateway-api = { git = "https://github.com/MaximilianGaedig/ruma", rev = "b9e7a7451fb3c402b2dec8835e382e8fd1b38313" }
-ruma-signatures = { git = "https://github.com/MaximilianGaedig/ruma", rev = "b9e7a7451fb3c402b2dec8835e382e8fd1b38313" }
+ruma = { git = "https://github.com/MaximilianGaedig/ruma", rev = "50a189e291b9bb09bdd214448bd66f48c009a72f" }
+ruma-appservice-api = { git = "https://github.com/MaximilianGaedig/ruma", rev = "50a189e291b9bb09bdd214448bd66f48c009a72f" }
+ruma-client-api = { git = "https://github.com/MaximilianGaedig/ruma", rev = "50a189e291b9bb09bdd214448bd66f48c009a72f" }
+ruma-common = { git = "https://github.com/MaximilianGaedig/ruma", rev = "50a189e291b9bb09bdd214448bd66f48c009a72f" }
+ruma-events = { git = "https://github.com/MaximilianGaedig/ruma", rev = "50a189e291b9bb09bdd214448bd66f48c009a72f" }
+ruma-federation-api = { git = "https://github.com/MaximilianGaedig/ruma", rev = "50a189e291b9bb09bdd214448bd66f48c009a72f" }
+ruma-identifiers-validation = { git = "https://github.com/MaximilianGaedig/ruma", rev = "50a189e291b9bb09bdd214448bd66f48c009a72f" }
+ruma-identity-service-api = { git = "https://github.com/MaximilianGaedig/ruma", rev = "50a189e291b9bb09bdd214448bd66f48c009a72f" }
+ruma-macros = { git = "https://github.com/MaximilianGaedig/ruma", rev = "50a189e291b9bb09bdd214448bd66f48c009a72f" }
+ruma-push-gateway-api = { git = "https://github.com/MaximilianGaedig/ruma", rev = "50a189e291b9bb09bdd214448bd66f48c009a72f" }
+ruma-signatures = { git = "https://github.com/MaximilianGaedig/ruma", rev = "50a189e291b9bb09bdd214448bd66f48c009a72f" }
 
 [patch.crates-io.rustyline-async]
 git = "https://github.com/matrix-construct/rustyline-async"

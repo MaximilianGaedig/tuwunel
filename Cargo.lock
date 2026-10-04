@@ -4150,7 +4150,7 @@ dependencies = [
 [[package]]
 name = "ruma"
 version = "0.16.0"
-source = "git+https://github.com/MaximilianGaedig/ruma?rev=b9e7a7451fb3c402b2dec8835e382e8fd1b38313#b9e7a7451fb3c402b2dec8835e382e8fd1b38313"
+source = "git+https://github.com/MaximilianGaedig/ruma?rev=50a189e291b9bb09bdd214448bd66f48c009a72f#50a189e291b9bb09bdd214448bd66f48c009a72f"
 dependencies = [
  "assign",
  "js_int",
@@ -4170,7 +4170,7 @@ dependencies = [
 [[package]]
 name = "ruma-appservice-api"
 version = "0.16.0"
-source = "git+https://github.com/MaximilianGaedig/ruma?rev=b9e7a7451fb3c402b2dec8835e382e8fd1b38313#b9e7a7451fb3c402b2dec8835e382e8fd1b38313"
+source = "git+https://github.com/MaximilianGaedig/ruma?rev=50a189e291b9bb09bdd214448bd66f48c009a72f#50a189e291b9bb09bdd214448bd66f48c009a72f"
 dependencies = [
  "js_int",
  "ruma-common",
@@ -4182,7 +4182,7 @@ dependencies = [
 [[package]]
 name = "ruma-client-api"
 version = "0.24.0"
-source = "git+https://github.com/MaximilianGaedig/ruma?rev=b9e7a7451fb3c402b2dec8835e382e8fd1b38313#b9e7a7451fb3c402b2dec8835e382e8fd1b38313"
+source = "git+https://github.com/MaximilianGaedig/ruma?rev=50a189e291b9bb09bdd214448bd66f48c009a72f#50a189e291b9bb09bdd214448bd66f48c009a72f"
 dependencies = [
  "as_variant",
  "assign",
@@ -4207,7 +4207,7 @@ dependencies = [
 [[package]]
 name = "ruma-common"
 version = "0.19.0"
-source = "git+https://github.com/MaximilianGaedig/ruma?rev=b9e7a7451fb3c402b2dec8835e382e8fd1b38313#b9e7a7451fb3c402b2dec8835e382e8fd1b38313"
+source = "git+https://github.com/MaximilianGaedig/ruma?rev=50a189e291b9bb09bdd214448bd66f48c009a72f#50a189e291b9bb09bdd214448bd66f48c009a72f"
 dependencies = [
  "as_variant",
  "base64 0.22.1",
@@ -4242,7 +4242,7 @@ dependencies = [
 [[package]]
 name = "ruma-events"
 version = "0.34.0"
-source = "git+https://github.com/MaximilianGaedig/ruma?rev=b9e7a7451fb3c402b2dec8835e382e8fd1b38313#b9e7a7451fb3c402b2dec8835e382e8fd1b38313"
+source = "git+https://github.com/MaximilianGaedig/ruma?rev=50a189e291b9bb09bdd214448bd66f48c009a72f#50a189e291b9bb09bdd214448bd66f48c009a72f"
 dependencies = [
  "as_variant",
  "indexmap",
@@ -4265,7 +4265,7 @@ dependencies = [
 [[package]]
 name = "ruma-federation-api"
 version = "0.15.0"
-source = "git+https://github.com/MaximilianGaedig/ruma?rev=b9e7a7451fb3c402b2dec8835e382e8fd1b38313#b9e7a7451fb3c402b2dec8835e382e8fd1b38313"
+source = "git+https://github.com/MaximilianGaedig/ruma?rev=50a189e291b9bb09bdd214448bd66f48c009a72f#50a189e291b9bb09bdd214448bd66f48c009a72f"
 dependencies = [
  "bytes",
  "headers",
@@ -4289,7 +4289,7 @@ dependencies = [
 [[package]]
 name = "ruma-identifiers-validation"
 version = "0.12.1"
-source = "git+https://github.com/MaximilianGaedig/ruma?rev=b9e7a7451fb3c402b2dec8835e382e8fd1b38313#b9e7a7451fb3c402b2dec8835e382e8fd1b38313"
+source = "git+https://github.com/MaximilianGaedig/ruma?rev=50a189e291b9bb09bdd214448bd66f48c009a72f#50a189e291b9bb09bdd214448bd66f48c009a72f"
 dependencies = [
  "js_int",
  "thiserror",
@@ -4298,7 +4298,7 @@ dependencies = [
 [[package]]
 name = "ruma-identity-service-api"
 version = "0.15.0"
-source = "git+https://github.com/MaximilianGaedig/ruma?rev=b9e7a7451fb3c402b2dec8835e382e8fd1b38313#b9e7a7451fb3c402b2dec8835e382e8fd1b38313"
+source = "git+https://github.com/MaximilianGaedig/ruma?rev=50a189e291b9bb09bdd214448bd66f48c009a72f#50a189e291b9bb09bdd214448bd66f48c009a72f"
 dependencies = [
  "js_int",
  "ruma-common",
@@ -4309,7 +4309,7 @@ dependencies = [
 [[package]]
 name = "ruma-macros"
 version = "0.19.0"
-source = "git+https://github.com/MaximilianGaedig/ruma?rev=b9e7a7451fb3c402b2dec8835e382e8fd1b38313#b9e7a7451fb3c402b2dec8835e382e8fd1b38313"
+source = "git+https://github.com/MaximilianGaedig/ruma?rev=50a189e291b9bb09bdd214448bd66f48c009a72f#50a189e291b9bb09bdd214448bd66f48c009a72f"
 dependencies = [
  "as_variant",
  "cfg-if",
@@ -4325,7 +4325,7 @@ dependencies = [
 [[package]]
 name = "ruma-push-gateway-api"
 version = "0.15.0"
-source = "git+https://github.com/MaximilianGaedig/ruma?rev=b9e7a7451fb3c402b2dec8835e382e8fd1b38313#b9e7a7451fb3c402b2dec8835e382e8fd1b38313"
+source = "git+https://github.com/MaximilianGaedig/ruma?rev=50a189e291b9bb09bdd214448bd66f48c009a72f#50a189e291b9bb09bdd214448bd66f48c009a72f"
 dependencies = [
  "js_int",
  "ruma-common",
@@ -4337,7 +4337,7 @@ dependencies = [
 [[package]]
 name = "ruma-signatures"
 version = "0.21.0"
-source = "git+https://github.com/MaximilianGaedig/ruma?rev=b9e7a7451fb3c402b2dec8835e382e8fd1b38313#b9e7a7451fb3c402b2dec8835e382e8fd1b38313"
+source = "git+https://github.com/MaximilianGaedig/ruma?rev=50a189e291b9bb09bdd214448bd66f48c009a72f#50a189e291b9bb09bdd214448bd66f48c009a72f"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
