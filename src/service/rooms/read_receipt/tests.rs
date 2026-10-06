@@ -215,3 +215,76 @@ mod private_read {
 		assert!(thread.starts_with(&prefix));
 	}
 }
+
+/// Receipts from different users on the same event must all reach the client: they are
+/// separate events in the store and one merged event in sliding sync.
+mod packing {
+	use ruma::{
+		events::{
+			AnySyncEphemeralRoomEvent, SyncEphemeralRoomEvent,
+			receipt::{Receipt, ReceiptEventContent, ReceiptType, Receipts},
+		},
+		serde::Raw,
+		MilliSecondsSinceUnixEpoch, OwnedEventId, OwnedUserId, UInt,
+	};
+	use serde_json::value::to_raw_value;
+
+	use super::super::pack_receipts_fallible;
+
+	fn receipt_event(
+		event: &str,
+		kind: ReceiptType,
+		user: &str,
+	) -> Raw<AnySyncEphemeralRoomEvent> {
+		let receipt = Receipt::new(MilliSecondsSinceUnixEpoch(UInt::from(1_u32)));
+		let users = [(OwnedUserId::try_from(user).unwrap(), receipt)].into();
+		let receipts: Receipts = [(kind, users)].into();
+		let content =
+			ReceiptEventContent([(OwnedEventId::try_from(event).unwrap(), receipts)].into());
+		let event = to_raw_value(&SyncEphemeralRoomEvent { content }).unwrap();
+		Raw::from_json(event)
+	}
+
+	fn users_of(packed: &ReceiptEventContent, event: &str, kind: &ReceiptType) -> Vec<String> {
+		packed.0[&OwnedEventId::try_from(event).unwrap()][kind]
+			.keys()
+			.map(ToString::to_string)
+			.collect()
+	}
+
+	#[test]
+	fn users_reading_the_same_event_are_all_kept() {
+		let packed = pack_receipts_fallible(
+			[
+				receipt_event("$a:x", ReceiptType::Read, "@bot:x"),
+				receipt_event("$a:x", ReceiptType::Read, "@ghost:x"),
+				receipt_event("$a:x", ReceiptType::Read, "@me:x"),
+			]
+			.into_iter(),
+		)
+		.unwrap();
+		let packed: SyncEphemeralRoomEvent<ReceiptEventContent> =
+			serde_json::from_str(packed.json().get()).unwrap();
+
+		assert_eq!(users_of(&packed.content, "$a:x", &ReceiptType::Read), [
+			"@bot:x", "@ghost:x", "@me:x"
+		]);
+	}
+
+	#[test]
+	fn receipt_types_on_one_event_are_kept_apart() {
+		let packed = pack_receipts_fallible(
+			[
+				receipt_event("$a:x", ReceiptType::Read, "@me:x"),
+				receipt_event("$a:x", ReceiptType::ReadPrivate, "@me:x"),
+			]
+			.into_iter(),
+		)
+		.unwrap();
+		let packed: SyncEphemeralRoomEvent<ReceiptEventContent> =
+			serde_json::from_str(packed.json().get()).unwrap();
+
+		assert_eq!(users_of(&packed.content, "$a:x", &ReceiptType::Read), ["@me:x"]);
+		assert_eq!(users_of(&packed.content, "$a:x", &ReceiptType::ReadPrivate), ["@me:x"]);
+	}
+}

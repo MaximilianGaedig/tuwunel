@@ -500,8 +500,13 @@ where
 			value.json().get(),
 		)?;
 
+		// Several users (and receipt types) can sit on one event; keep them all rather than
+		// letting the last receipt for an event replace the others.
 		for (event, receipt) in value.content {
-			json.insert(event, receipt);
+			let packed = json.entry(event).or_insert_with(Receipts::new);
+			for (kind, users) in receipt {
+				packed.entry(kind).or_default().extend(users);
+			}
 		}
 
 		Ok(json)
