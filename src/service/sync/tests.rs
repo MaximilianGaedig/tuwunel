@@ -192,7 +192,7 @@ fn prologue_rewinds_a_complete_range_for_replay() {
 
 	conn.update_rooms_prologue(Some(5));
 
-	assert_eq!(conn.rooms[replay].roomsince, 5);
+	assert_eq!(conn.rooms[replay].roomsince, 0, "owed in full, as a new room");
 	assert_eq!(conn.rooms[replay].config_hash, 0);
 	assert!(conn.rooms[replay].required_state.is_empty());
 	assert_eq!(conn.rooms[retained].roomsince, 4);
@@ -230,7 +230,10 @@ fn prologue_keeps_a_configuration_delivered_before_the_replayed_position() {
 	assert_eq!(conn.rooms[held].roomsince, 15);
 	assert_eq!(conn.rooms[held].config_hash, 17);
 	assert_eq!(conn.rooms[held].required_state.as_slice(), &[2, 4]);
-	assert_eq!(conn.rooms[newer].roomsince, 15);
+	assert_eq!(
+		conn.rooms[newer].roomsince, 0,
+		"a room first configured after the position is sent as new (`initial`)"
+	);
 	assert_eq!(conn.rooms[newer].config_hash, 0);
 	assert!(conn.rooms[newer].required_state.is_empty());
 }
