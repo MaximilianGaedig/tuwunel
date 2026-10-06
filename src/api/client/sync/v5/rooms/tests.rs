@@ -274,3 +274,24 @@ fn invites_and_knocks_are_outside_the_room() {
 	assert!(!membership_is_outside(Some(&MembershipState::Leave)));
 	assert!(!membership_is_outside(None));
 }
+
+/// Element X takes service members off `joined_count` only when it finds them
+/// among the heroes; left out, a bridged DM with its bot was "Jakub, and 2
+/// others". The people stay first, as the name and avatar come from them.
+#[test]
+fn service_members_follow_the_people_among_the_heroes() {
+	use ruma::api::client::sync::sync_events::v5::response::Hero;
+
+	let person = Hero {
+		user_id: user_id!("@facebook_1:example.com").to_owned(),
+		name: Some("Jakub".into()),
+		avatar: None,
+	};
+	let bot = user_id!("@facebookbot:example.com").to_owned();
+
+	let heroes = super::heroes::with_service_heroes(vec![person].into(), vec![bot.clone()]);
+
+	let ids: Vec<_> = heroes.iter().map(|hero| hero.user_id.clone()).collect();
+	assert_eq!(ids, vec![user_id!("@facebook_1:example.com").to_owned(), bot]);
+	assert_eq!(heroes[0].name.as_deref(), Some("Jakub"));
+}

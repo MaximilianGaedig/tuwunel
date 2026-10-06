@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use futures::{StreamExt, future::join};
 use ruma::{
-	MxcUri, OwnedMxcUri, RoomId, UserId,
+	MxcUri, OwnedMxcUri, OwnedUserId, RoomId, UserId,
 	api::client::sync::sync_events::v5::{DisplayName, response, response::Heroes},
 };
 use tuwunel_core::utils::{BoolExt, ReadyExt, TryFutureExtExt, stream::BroadbandExt};
@@ -97,5 +97,27 @@ pub(super) async fn calculate_heroes(
 		})
 		.flatten();
 
-	(Some(heroes), hero_name, heroes_avatar)
+	// The service members go out too, after the people: they are in `joined_count`, and a client
+	// only takes them off that count when it finds them among the heroes (matrix-rust-sdk). Left
+	// out, Element X named a bridged DM "Jakub, and 2 others".
+	let service_heroes: Vec<_> = services
+		.state_cache
+		.room_members(room_id)
+		.ready_filter(|&member| member != sender_user && services_members.contains(member))
+		.ready_filter(|_| room_name.is_none())
+		.map(ToOwned::to_owned)
+		.collect()
+		.await;
+
+	(Some(with_service_heroes(heroes, service_heroes)), hero_name, heroes_avatar)
+}
+
+/// The heroes a client is sent: the people first, then the room's joined service members.
+pub(super) fn with_service_heroes(mut heroes: Heroes, service_members: Vec<OwnedUserId>) -> Heroes {
+	heroes.extend(service_members.into_iter().map(|user_id| response::Hero {
+		user_id,
+		name: None,
+		avatar: None,
+	}));
+	heroes
 }
