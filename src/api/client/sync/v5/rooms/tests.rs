@@ -289,7 +289,7 @@ fn service_members_follow_the_people_among_the_heroes() {
 	};
 	let bot = user_id!("@facebookbot:example.com").to_owned();
 
-	let heroes = super::heroes::with_service_heroes(vec![person], vec![bot.clone()]);
+	let heroes = super::heroes::with_service_heroes(vec![person].into(), vec![bot.clone()]);
 
 	let ids: Vec<_> = heroes.iter().map(|hero| hero.user_id.clone()).collect();
 	assert_eq!(ids, vec![user_id!("@facebook_1:example.com").to_owned(), bot]);
