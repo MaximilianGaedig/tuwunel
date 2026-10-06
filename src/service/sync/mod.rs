@@ -390,8 +390,11 @@ pub fn update_rooms_prologue(&mut self, retard_since: Option<u64>) {
 
 			// The client at `retard_since` has the room as configured when the
 			// configuration was delivered at or before it; it is only owed
-			// what happened since. Otherwise it is owed the room in full.
+			// what happened since. Otherwise it is owed the room in full, and
+			// as a new room: a client that never had it ignores a room sent
+			// without `initial`, so it stayed missing until the next reload.
 			if room.config_since == 0 || room.config_since > retard_since {
+				room.roomsince = 0;
 				room.config_hash = 0;
 				room.required_state.clear();
 				room.config_since = 0;
