@@ -8,18 +8,22 @@ use std::collections::HashSet;
 
 use futures::{StreamExt, pin_mut};
 use ruma::{
-	OwnedUserId, RoomId, UserId,
+	EventId, OwnedUserId, RoomId, UserId,
 	events::{
-		AnyStrippedStateEvent, StateEventType,
+		AnyStrippedStateEvent, AnySyncStateEvent, StateEventType,
 		TimelineEventType::{RoomCreate, RoomMember},
 	},
 	serde::Raw,
+	uint,
 };
 use serde::Deserialize;
 use tuwunel_core::{
 	Error, PduCount, Result, debug_warn, is_equal_to,
-	matrix::{Event, pdu::PduEvent},
-	utils::{ReadyExt, result::LogErr, stream::BroadbandExt},
+	matrix::{
+		Event,
+		pdu::{EventHash, PduEvent},
+	},
+	utils::{ReadyExt, result::LogErr, stream::BroadbandExt, time::now_millis},
 };
 use tuwunel_service::{Services, users::InviteFilter};
 
@@ -359,6 +363,38 @@ fn strip_prev_state(
 	}
 
 	pdu
+}
+
+/// Builds a minimal leave event for a left room whose state supplies none.
+///
+/// A rescinded or rejected federated invite, or deleted, missing, or broken
+/// room state, leaves no real membership event to send, while clients read the
+/// departure from one. The stand-in names the user as sender under a fresh
+/// local event ID.
+fn stand_in_leave(
+	services: &Services,
+	room_id: &RoomId,
+	sender_user: &UserId,
+) -> Result<Raw<AnySyncStateEvent>> {
+	let event = PduEvent {
+		event_id: EventId::new_v1(services.globals.server_name()),
+		origin_server_ts: now_millis().try_into()?,
+		kind: RoomMember,
+		state_key: Some(sender_user.as_str().into()),
+		sender: sender_user.to_owned(),
+		content: serde_json::from_str(r#"{"membership":"leave"}"#)?,
+		// The following keys are dropped on conversion
+		room_id: room_id.to_owned(),
+		depth: uint!(1),
+		origin: None,
+		unsigned: None,
+		redacts: None,
+		hashes: EventHash::default(),
+		auth_events: Default::default(),
+		prev_events: Default::default(),
+	};
+
+	Ok(event.into_format())
 }
 
 #[cfg(test)]

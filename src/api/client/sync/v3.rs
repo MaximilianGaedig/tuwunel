@@ -10,7 +10,7 @@ use futures::{
 	pin_mut, stream,
 };
 use ruma::{
-	DeviceId, EventId, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, UInt, UserId,
+	DeviceId, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, UInt, UserId,
 	api::client::{
 		filter::FilterDefinition,
 		sync::sync_events::{
@@ -43,14 +43,14 @@ use tuwunel_core::{
 	matrix::{
 		Event,
 		event::{Matches, trim_event_fields},
-		pdu::{EventHash, PduCount, PduEvent},
+		pdu::{PduCount, PduEvent},
 	},
 	pair_of, ref_at,
 	result::FlatOk,
 	smallvec::SmallVec,
 	trace,
 	utils::{
-		self, BoolExt, FutureBoolExt, IterStream, ReadyExt, TryFutureExtExt,
+		BoolExt, FutureBoolExt, IterStream, ReadyExt, TryFutureExtExt,
 		future::{OptionStream, ReadyBoolExt},
 		math::ruma_from_u64,
 		option::OptionExt,
@@ -74,7 +74,7 @@ use tuwunel_service::{
 
 use super::{
 	invite_permitted, load_timeline, profiles::collect as collect_profiles, share_encrypted_room,
-	strip_prev_state, timeline_prev_batch,
+	stand_in_leave, strip_prev_state, timeline_prev_batch,
 };
 use crate::{
 	ClientIp, Ruma,
@@ -1100,26 +1100,9 @@ fn minimal_left_room(
 	state_after: StateAfter,
 	filter: &FilterDefinition,
 ) -> Result<LeftRoom> {
-	let event = PduEvent {
-		event_id: EventId::new_v1(services.globals.server_name()),
-		origin_server_ts: utils::millis_since_unix_epoch().try_into()?,
-		kind: RoomMember,
-		state_key: Some(sender_user.as_str().into()),
-		sender: sender_user.to_owned(),
-		content: serde_json::from_str(r#"{"membership":"leave"}"#)?,
-		// The following keys are dropped on conversion
-		room_id: room_id.to_owned(),
-		depth: uint!(1),
-		origin: None,
-		unsigned: None,
-		redacts: None,
-		hashes: EventHash::default(),
-		auth_events: Default::default(),
-		prev_events: Default::default(),
-	};
-
+	let event = stand_in_leave(services, room_id, sender_user)?;
 	let state = state_after.wrap(StateEvents {
-		events: vec![trim_event_fields(event.into_format(), filter.event_fields.as_deref())],
+		events: vec![trim_event_fields(event, filter.event_fields.as_deref())],
 	});
 
 	Ok(LeftRoom {
@@ -2749,6 +2732,8 @@ async fn typings_event_for_user(
 
 #[cfg(test)]
 mod tests {
+	use ruma::EventId;
+
 	use super::*;
 
 	const SINCE: u64 = 100;
