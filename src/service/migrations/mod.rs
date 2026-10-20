@@ -79,6 +79,8 @@ const FORCE_MIGRATION_DELAY: Duration = Duration::from_secs(15);
 
 const CLEAR_STATE_LOCAL_ERROR_MEMOS: &str = "clear_state_local_error_memos";
 
+const REMOVE_SUPERSEDED_ACCOUNT_DATA: &str = "remove_superseded_account_data";
+
 /// A marker written by a sibling conduwuit-lineage server but never by tuwunel.
 /// Its presence identifies a foreign database at a higher schema number even
 /// after tuwunel has stamped its own `server_name`, so a database opened by
@@ -258,6 +260,7 @@ async fn fresh(services: &Services) -> Result {
 	db["global"].insert("adopt_foreign_account_status", []);
 	db["global"].insert("adopt_foreign_email_bindings", []);
 	db["global"].insert("adopt_foreign_token_expiry", []);
+	db["global"].insert(REMOVE_SUPERSEDED_ACCOUNT_DATA, []);
 	mark_clean_injectivity(services);
 
 	// Create the admin room and server user on first run
@@ -400,6 +403,17 @@ async fn migrate(services: &Services, foreign_lineage: bool) -> Result {
 		migrate_token_expiry(services).await?;
 
 		db["global"].insert("adopt_foreign_token_expiry", []);
+	}
+
+	// Concurrent account data updates each left the revision they superseded
+	// beside their own, and sync served all of them (MEO-188).
+	if pending(services, REMOVE_SUPERSEDED_ACCOUNT_DATA).await? {
+		services
+			.account_data
+			.remove_superseded_revisions()
+			.await?;
+
+		db["global"].insert(REMOVE_SUPERSEDED_ACCOUNT_DATA, []);
 	}
 
 	services.server.check_running()?;
