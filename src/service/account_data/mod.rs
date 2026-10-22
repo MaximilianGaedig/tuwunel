@@ -10,9 +10,9 @@ mod room_tags;
 
 use std::sync::Arc;
 
-use futures::{Stream, StreamExt, TryFutureExt, pin_mut};
+use futures::{Stream, StreamExt, TryFutureExt, TryStreamExt, pin_mut};
 use ruma::{
-	RoomId, UserId,
+	OwnedUserId, RoomId, UserId,
 	events::{
 		AnyGlobalAccountDataEvent, AnyRawAccountDataEvent, AnyRoomAccountDataEvent,
 		GlobalAccountDataEventType, RoomAccountDataEventType,
@@ -23,10 +23,13 @@ use ruma::{
 use serde::Deserialize;
 use serde_json::json;
 use tuwunel_core::{
-	Err, Result, at, err, implement,
-	utils::{ReadyExt, TryReadyExt, result::LogErr, stream::TryIgnore},
+	Err, Result, at, err, implement, info,
+	utils::{MutexMap, ReadyExt, TryReadyExt, result::LogErr, stream::TryIgnore},
+	warn,
 };
-use tuwunel_database::{Deserialized, Handle, Ignore, Interfix, Json, Map};
+use tuwunel_database::{
+	Deserialized, Handle, Ignore, Interfix, Json, Map, deserialize_from_slice,
+};
 
 /// Maximum number of push rules one account may hold.
 ///
@@ -54,7 +57,18 @@ pub const MAX_RULE_BYTES: usize = 1024;
 pub struct Service {
 	services: Arc<crate::services::OnceServices>,
 	db: Data,
+
+	/// Serializes [`update`](Service::update) per user.
+	///
+	/// An update reads the pointer to the revision it supersedes, then deletes
+	/// that revision in its own transaction. Two concurrent updates of one type
+	/// read the same pointer, so the revision written by whichever commits first
+	/// was never deleted and stayed in sync responses beside the current one.
+	write_mutex: MutexMap<OwnedUserId, ()>,
 }
+
+/// Key of one stored revision: scope, owner, counter and event type.
+type RevisionKey<'a> = (Option<&'a RoomId>, &'a UserId, u64, &'a str);
 
 struct Data {
 	roomuserdataid_accountdata: Arc<Map>,
@@ -69,6 +83,7 @@ impl crate::Service for Service {
 				roomuserdataid_accountdata: args.db["roomuserdataid_accountdata"].clone(),
 				roomusertype_roomuserdataid: args.db["roomusertype_roomuserdataid"].clone(),
 			},
+			write_mutex: MutexMap::new(),
 		}))
 	}
 
@@ -108,6 +123,7 @@ pub async fn update(
 		return Err!(Request(InvalidParam("Account data doesn't have all required fields.")));
 	}
 
+	let write_lock = self.write_mutex.lock(user_id).await;
 	let count = self.services.globals.next_count();
 	let roomuserdataid = (room_id, user_id, *count, &event_type);
 	let key = (room_id, user_id, &event_type);
@@ -139,10 +155,17 @@ pub async fn update(
 	}
 
 	txn.execute();
+	drop(write_lock);
 
 	if bridged {
-		self.notify_appservices(room_id, user_id, &event_type.to_string(), data, prev_data.as_ref())
-			.await;
+		self.notify_appservices(
+			room_id,
+			user_id,
+			&event_type.to_string(),
+			data,
+			prev_data.as_ref(),
+		)
+		.await;
 	}
 
 	Ok(())
@@ -260,26 +283,102 @@ pub fn changes_since_fallible<'a>(
 	since: u64,
 	to: Option<u64>,
 ) -> impl Stream<Item = Result<AnyRawAccountDataEvent>> + Send + 'a {
-	type Key<'a> = (Option<&'a RoomId>, &'a UserId, u64, Ignore);
-
 	// Skip the data that's exactly at since, because we sent that last time
 	let first_possible = (room_id, user_id, since.saturating_add(1));
 
 	self.db
 		.roomuserdataid_accountdata
-		.stream_from(&first_possible)
-		.ready_try_take_while(move |((room_id_, user_id_, count, _), _): &(Key<'_>, _)| {
-			Ok(room_id == *room_id_ && user_id == *user_id_ && to.is_none_or(|to| *count <= to))
-		})
-		.ready_and_then(move |(_, v)| {
+		.stream_from_raw(&first_possible)
+		.ready_and_then(move |(key, val)| {
+			let (room_id_, user_id_, count, kind): RevisionKey<'_> = deserialize_from_slice(key)?;
+
+			if room_id != room_id_ || user_id != user_id_ || to.is_some_and(|to| count > to) {
+				return Ok(None);
+			}
+
 			match room_id {
-				| Some(_) => serde_json::from_slice::<Raw<AnyRoomAccountDataEvent>>(v)
+				| Some(_) => serde_json::from_slice::<Raw<AnyRoomAccountDataEvent>>(val)
 					.map(AnyRawAccountDataEvent::Room),
-				| None => serde_json::from_slice::<Raw<AnyGlobalAccountDataEvent>>(v)
+				| None => serde_json::from_slice::<Raw<AnyGlobalAccountDataEvent>>(val)
 					.map(AnyRawAccountDataEvent::Global),
 			}
+			.map(|event| Some((key.to_vec(), kind.to_owned(), event)))
 			.map_err(|e| err!(Database("Database contains invalid account data: {e}")))
 		})
+		.ready_try_take_while(|revision| Ok(revision.is_some()))
+		.try_filter_map(move |revision| async move {
+			let Some((key, kind, event)) = revision else {
+				return Ok(None);
+			};
+
+			Ok(self
+				.is_current_revision(room_id, user_id, &kind, &key)
+				.await
+				.then_some(event))
+		})
+}
+
+/// Whether a stored revision is the one the type's pointer names.
+///
+/// A superseded revision left behind by an update is not, and is never served:
+/// only the latest content of each type reaches a client. A revision no pointer
+/// names at all is kept, since no update can have superseded it.
+#[implement(Service)]
+async fn is_current_revision(
+	&self,
+	room_id: Option<&RoomId>,
+	user_id: &UserId,
+	kind: &str,
+	roomuserdataid: &[u8],
+) -> bool {
+	self.db
+		.roomusertype_roomuserdataid
+		.qry(&(room_id, user_id, kind))
+		.await
+		.ok()
+		.is_none_or(|current| *current == *roomuserdataid)
+}
+
+/// Deletes every stored revision a newer one of the same type superseded.
+///
+/// Such revisions were left by concurrent updates before
+/// [`update`](Service::update) was serialized. Returns how many revisions were
+/// read and how many were deleted.
+#[implement(Service)]
+pub async fn remove_superseded_revisions(&self) -> Result<(usize, usize)> {
+	let keys: Vec<Vec<u8>> = self
+		.db
+		.roomuserdataid_accountdata
+		.raw_keys()
+		.map_ok(<[u8]>::to_vec)
+		.try_collect()
+		.await?;
+
+	let mut txn = self.services.db.txn();
+	let mut removed: usize = 0;
+	for key in &keys {
+		let Ok((room_id, user_id, _, kind)) = deserialize_from_slice::<RevisionKey<'_>>(key)
+		else {
+			warn!(?key, "Skipping undecodable account data key.");
+			continue;
+		};
+
+		if !self
+			.is_current_revision(room_id, user_id, kind, key)
+			.await
+		{
+			txn.del_raw(&self.db.roomuserdataid_accountdata, key);
+			removed = removed.saturating_add(1);
+		}
+	}
+
+	if removed > 0 {
+		txn.execute();
+	}
+
+	info!(total = keys.len(), removed, "Removed superseded account data revisions.");
+
+	Ok((keys.len(), removed))
 }
 
 /// Erases a user's account data within one MSC4025 namespace.
