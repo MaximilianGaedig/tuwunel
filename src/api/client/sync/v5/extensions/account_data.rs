@@ -4,7 +4,10 @@ use futures::{StreamExt, TryStreamExt};
 use ruma::{
 	OwnedRoomId,
 	api::client::sync::sync_events::v5::response::AccountData,
-	events::{AnyRawAccountDataEvent, AnyRoomAccountDataEvent},
+	events::{
+		AnyGlobalAccountDataEvent, AnyRawAccountDataEvent, AnyRoomAccountDataEvent,
+		GlobalAccountDataEventType,
+	},
 	serde::Raw,
 };
 use tuwunel_core::{
@@ -17,7 +20,7 @@ use crate::client::{is_empty_account_data_event, sync::v5::range::Results};
 
 #[tracing::instrument(name = "account_data", level = "trace", skip_all)]
 pub(super) async fn collect(
-	SyncInfo { services, sender_user, .. }: SyncInfo<'_>,
+	SyncInfo { services, sender_user, notification, .. }: SyncInfo<'_>,
 	conn: &Connection,
 ) -> Result<AccountData> {
 	let globalsince = conn.globalsince;
@@ -26,6 +29,7 @@ pub(super) async fn collect(
 		.changes_since_fallible(None, sender_user, globalsince, Some(conn.next_batch))
 		.ready_try_filter_map(|event| Ok(extract_variant!(event, AnyRawAccountDataEvent::Global)))
 		.ready_try_filter(move |event| globalsince != 0 || !is_empty_account_data_event(event))
+		.ready_try_filter(move |event| !notification || is_notification_type(event))
 		.try_collect()
 		.await?;
 
@@ -62,6 +66,24 @@ pub(super) async fn collect(
 		.unwrap_or_default();
 
 	Ok(AccountData { global, rooms })
+}
+
+/// The global account data types a notification client reads: the push rules
+/// it evaluates on the device, `m.direct` for "is this a DM" and the ignored
+/// users it filters out (matrix-rust-sdk `NotificationClient`,
+/// `notification_client.rs`).
+const NOTIFICATION_TYPES: [GlobalAccountDataEventType; 3] = [
+	GlobalAccountDataEventType::PushRules,
+	GlobalAccountDataEventType::Direct,
+	GlobalAccountDataEventType::IgnoredUserList,
+];
+
+fn is_notification_type(event: &Raw<AnyGlobalAccountDataEvent>) -> bool {
+	event
+		.get_field::<GlobalAccountDataEventType>("type")
+		.ok()
+		.flatten()
+		.is_some_and(|kind| NOTIFICATION_TYPES.contains(&kind))
 }
 
 pub(super) fn collect_ranges(

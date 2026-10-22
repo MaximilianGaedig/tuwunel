@@ -476,6 +476,35 @@ pub struct Config {
 	#[serde(default = "default_client_sync_timeout_max")]
 	pub client_sync_timeout_max: u64,
 
+	/// Answer the sliding sync connections named in
+	/// `sync_notification_conn_ids` with only the global account data a
+	/// notification needs: `m.push_rules`, `m.direct` and
+	/// `m.ignored_user_list`. Room account data is unchanged.
+	///
+	/// Element X's notification extension (matrix-rust-sdk's
+	/// `NotificationClient`) opens a new connection named `notifications`
+	/// for every push and asks for the account data extension, so every push
+	/// downloads all of the user's global account data, most of which it
+	/// never reads. It evaluates the push rules on the device and uses
+	/// `m.direct` and the ignored-user list; nothing else.
+	///
+	/// This bends the rule that a new connection receives all account data:
+	/// a client that gave its main connection one of these names would never
+	/// see the other types. The notification client keeps that connection's
+	/// state in memory and drops it after the push, so for it nothing is
+	/// lost.
+	///
+	/// reloadable: yes
+	#[serde(default)]
+	pub sync_notification_lean: bool,
+
+	/// The sliding sync `conn_id`s that `sync_notification_lean` applies to.
+	///
+	/// reloadable: yes
+	/// default: ["notifications"]
+	#[serde(default = "default_sync_notification_conn_ids")]
+	pub sync_notification_conn_ids: Vec<String>,
+
 	/// Custom DNS servers to query instead of the operating system's default
 	/// resolvers; when this list is non-empty, `/etc/resolv.conf` is never
 	/// read. Each entry is an IP address with an optional port, defaulting to
@@ -5989,3 +6018,5 @@ fn default_media_storage_providers() -> BTreeSet<String> { ["media".to_owned()].
 fn default_multipart_threshold() -> ByteSize { ByteSize::mib(100) }
 
 fn default_multipart_part_size() -> ByteSize { ByteSize::mib(10) }
+
+fn default_sync_notification_conn_ids() -> Vec<String> { vec!["notifications".to_owned()] }
