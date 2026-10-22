@@ -1,9 +1,10 @@
 use std::time::Duration;
 
 use axum::extract::State;
+use http::{HeaderMap, header::USER_AGENT};
 use reqwest::Url;
 use ruma::{
-	MilliSecondsSinceUnixEpoch, Mxc, UserId,
+	DeviceId, MilliSecondsSinceUnixEpoch, Mxc, UserId,
 	api::client::{
 		authenticated_media::{
 			get_content, get_content_as_filename, get_content_thumbnail, get_media_config,
@@ -13,7 +14,7 @@ use ruma::{
 	},
 };
 use tuwunel_core::{
-	Err, Result, err,
+	Err, Result, debug, err, info,
 	utils::{
 		self, content_disposition::make_content_disposition, math::ruma_from_usize,
 		time::now_millis,
@@ -196,6 +197,7 @@ pub(crate) async fn get_content_thumbnail_route(
 pub(crate) async fn get_content_route(
 	State(services): State<crate::State>,
 	ClientIp(client): ClientIp,
+	headers: HeaderMap,
 	body: Ruma<get_content::v1::Request>,
 ) -> Result<get_content::v1::Response> {
 	let mxc = Mxc {
@@ -203,11 +205,21 @@ pub(crate) async fn get_content_route(
 		media_id: &body.media_id,
 	};
 
+	let media = fetch_file(&services, &mxc, body.timeout_ms, None).await?;
 	let Media {
 		content,
 		content_type,
 		content_disposition,
-	} = fetch_file(&services, &mxc, body.timeout_ms, None).await?;
+	} = notification_media(
+		&services,
+		body.sender_user.as_deref(),
+		body.sender_device.as_deref(),
+		&headers,
+		&mxc,
+		body.timeout_ms,
+		media,
+	)
+	.await?;
 
 	Ok(get_content::v1::Response {
 		file: content,
@@ -230,6 +242,7 @@ pub(crate) async fn get_content_route(
 pub(crate) async fn get_content_as_filename_route(
 	State(services): State<crate::State>,
 	ClientIp(client): ClientIp,
+	headers: HeaderMap,
 	body: Ruma<get_content_as_filename::v1::Request>,
 ) -> Result<get_content_as_filename::v1::Response> {
 	let mxc = Mxc {
@@ -237,11 +250,21 @@ pub(crate) async fn get_content_as_filename_route(
 		media_id: &body.media_id,
 	};
 
+	let media = fetch_file(&services, &mxc, body.timeout_ms, Some(&body.filename)).await?;
 	let Media {
 		content,
 		content_type,
 		content_disposition,
-	} = fetch_file(&services, &mxc, body.timeout_ms, Some(&body.filename)).await?;
+	} = notification_media(
+		&services,
+		body.sender_user.as_deref(),
+		body.sender_device.as_deref(),
+		&headers,
+		&mxc,
+		body.timeout_ms,
+		media,
+	)
+	.await?;
 
 	Ok(get_content_as_filename::v1::Response {
 		file: content,
@@ -356,4 +379,80 @@ async fn fetch_file(
 		content_type,
 		content_disposition,
 	})
+}
+
+/// What a push notification extension's download is answered with.
+///
+/// A download is the extension's when the user agent matches
+/// `nse_media_user_agents` and the media was just pushed in full to the
+/// requesting device. Audio and video, and anything larger than
+/// `nse_media_max_bytes`, are answered 404, which the extension takes as no
+/// attachment; a large image gets a thumbnail instead when
+/// `nse_media_thumbnail` is set. Every other download is the original.
+async fn notification_media(
+	services: &Services,
+	user: Option<&UserId>,
+	device: Option<&DeviceId>,
+	headers: &HeaderMap,
+	mxc: &Mxc<'_>,
+	timeout_ms: Duration,
+	media: Media,
+) -> Result<Media> {
+	let config = &services.config;
+	if config.nse_media_user_agents.is_empty() {
+		return Ok(media);
+	}
+
+	let (Some(user), Some(device)) = (user, device) else {
+		return Ok(media);
+	};
+
+	let is_extension = headers
+		.get(USER_AGENT)
+		.and_then(|agent| agent.to_str().ok())
+		.is_some_and(|agent| config.nse_media_user_agents.is_match(agent));
+
+	if !is_extension
+		|| !services
+			.pusher
+			.media_recently_pushed(user, device, &mxc.to_string())
+	{
+		return Ok(media);
+	}
+
+	let kind = media.content_type.as_deref().unwrap_or_default();
+	let bytes = media.content.len();
+	let large = u64::try_from(bytes).unwrap_or(u64::MAX) > config.nse_media_max_bytes;
+	let audiovisual = kind.starts_with("audio/") || kind.starts_with("video/");
+	let thumbnail = !audiovisual
+		&& large
+		&& config.nse_media_thumbnail
+		&& kind.starts_with("image/");
+
+	let decision = match (audiovisual, large, thumbnail) {
+		| (true, ..) => "skip",
+		| (false, false, _) => "original",
+		| (false, true, true) => "thumbnail",
+		| (false, true, false) => "skip",
+	};
+
+	info!(%mxc, content_type = kind, bytes, decision, "NSE media");
+
+	match decision {
+		| "original" => Ok(media),
+		| "thumbnail" => fetch_thumbnail(
+			services,
+			mxc,
+			user,
+			timeout_ms,
+			&Dim::largest(),
+			Animate::Never,
+		)
+		.await
+		.or_else(|error| {
+			debug!(%mxc, %error, "No thumbnail for a notification extension");
+			Err!(Request(NotFound("No notification-sized version of this media.")))
+		}),
+		| _ => Err!(Request(NotFound("Not sent to notification extensions."))),
+	}
 }

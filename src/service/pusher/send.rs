@@ -119,6 +119,11 @@ where
 		self.release_burst(user_id, &pusher.ids.pushkey, event.room_id(), reserved);
 	}
 
+	if result.is_ok() {
+		self.note_pushed_media(user_id, &pusher.ids.pushkey, event)
+			.await;
+	}
+
 	result
 }
 

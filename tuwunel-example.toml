@@ -2197,6 +2197,46 @@
 #
 #push_active_elsewhere_s = 0
 
+# Recognise downloads by a push notification extension (Element X's on
+# iOS) and keep them small. A media download counts as the extension's
+# when the request's user agent matches one of these patterns and the
+# media was in an event this server pushed in full to the requesting
+# device within the last two minutes. For such a download:
+#
+# - audio and video are answered 404 (M_NOT_FOUND), and the extension
+#   shows the notification without an attachment;
+# - an image larger than `nse_media_max_bytes` is answered with an
+#   800x600 thumbnail when `nse_media_thumbnail` is set, else 404 too;
+# - anything else larger than `nse_media_max_bytes` is answered 404.
+#
+# Media in encrypted rooms is never recognised: the server cannot see
+# which media an encrypted event carries.
+#
+# Element X's extension and app share one media cache, so a thumbnail
+# served to the extension is what the app later shows and saves as the
+# original of that image. A 404 is not cached. Only the authenticated
+# download endpoints are covered. Empty (the default) disables this.
+#
+# reloadable: yes
+# example: ["^Element X/.*; Scale/2\\.00\\)$"]
+#
+#nse_media_user_agents = []
+
+# Size above which a notification extension's image or other non-audio,
+# non-video download is reduced (see `nse_media_user_agents`).
+#
+# reloadable: yes
+#
+#nse_media_max_bytes = 1048576
+
+# Answer a notification extension's download of a large image with a
+# thumbnail instead of 404 (see `nse_media_user_agents` for the cache
+# trade-off).
+#
+# reloadable: yes
+#
+#nse_media_thumbnail = false
+
 # Evaluate the `im.nheko.msc3664.related_event_match` push rule condition,
 # which matches on a property of the event that an incoming event relates
 # to.
