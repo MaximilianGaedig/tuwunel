@@ -1,3 +1,4 @@
+mod active;
 mod append;
 mod badge;
 mod notification;
@@ -101,6 +102,7 @@ pub struct Service {
 	suppressed: suppressed::SuppressedQueue,
 	sent_badges: SentBadges,
 	push_bursts: BurstWindows,
+	active_rooms: active::ActiveRooms,
 }
 
 struct Data {
@@ -132,6 +134,7 @@ impl crate::Service for Service {
 			suppressed: suppressed::SuppressedQueue::default(),
 			sent_badges: SentBadges::default(),
 			push_bursts: BurstWindows::default(),
+			active_rooms: active::ActiveRooms::default(),
 		}))
 	}
 

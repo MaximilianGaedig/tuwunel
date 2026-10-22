@@ -139,6 +139,13 @@ pub(crate) async fn create_receipt_route(
 		},
 	};
 
+	services.pusher.note_room_activity(
+		sender_user,
+		&body.room_id,
+		body.sender_device.as_deref(),
+		None,
+	);
+
 	if advanced {
 		reset_and_refresh_badge(
 			&services,

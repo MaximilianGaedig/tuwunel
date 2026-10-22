@@ -105,6 +105,21 @@ pub(crate) async fn set_read_marker_route(
 		},
 	};
 
+	// A bridge replaying a receipt earned long ago passes its time on, so an
+	// old one does not count as being active now.
+	let ts = read_receipt_ts(
+		body.appservice_info.is_some(),
+		body.json_body.as_ref(),
+		MilliSecondsSinceUnixEpoch::now(),
+	);
+
+	services.pusher.note_room_activity(
+		sender_user,
+		&body.room_id,
+		body.sender_device.as_deref(),
+		Some(ts.get().into()),
+	);
+
 	// Route through the dispatcher so per-thread counts are also cleared;
 	// `/read_markers` predates MSC3771 and carries no thread field.
 	if private_advanced || public_advanced {

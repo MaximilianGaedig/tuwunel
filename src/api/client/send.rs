@@ -167,6 +167,15 @@ pub(crate) async fn send_message_event_route(
 
 	drop(state_lock);
 
+	services.pusher.note_room_activity(
+		sender_user,
+		&body.room_id,
+		sender_device,
+		appservice_info
+			.and(body.timestamp)
+			.map(|ts| ts.get().into()),
+	);
+
 	Ok(send_message_event::v3::Response { event_id })
 }
 

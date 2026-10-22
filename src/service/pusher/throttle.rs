@@ -12,11 +12,14 @@
 //! - `push_quiet_badge_only`: a notification whose actions carry no sound tweak
 //!   only updates the badge.
 //!
-//! Highlights (mentions), call invites or rings and encrypted events are exempt
-//! from both, and a full push sent for them restarts the window. The server
-//! cannot see what an encrypted event is (a call, a mention, a plain message)
-//! nor whether the client's own rules would sound for it, so it is never
-//! reduced to a badge. Both policies are off by
+//! A third, `push_active_elsewhere_s` (see `active.rs`), sends a badge update
+//! while the user is active in the room on another device.
+//!
+//! Highlights (mentions) and call invites or rings are exempt from all three,
+//! and a full push sent for them restarts the window. Encrypted events are
+//! exempt from the first two: the server cannot see what an encrypted event is
+//! (a call, a mention, a plain message) nor whether the client's own rules
+//! would sound for it. All three are off by
 //! default.
 
 use std::{
@@ -57,6 +60,8 @@ pub(super) enum Delivery {
 	BurstBadge,
 	/// Counts only: a notification without a sound.
 	QuietBadge,
+	/// Counts only: the user is active in the room on another device.
+	ActiveBadge,
 }
 
 impl Delivery {
@@ -65,6 +70,7 @@ impl Delivery {
 			| Self::Full(_) => "full",
 			| Self::BurstBadge => "burst_badge",
 			| Self::QuietBadge => "quiet_badge",
+			| Self::ActiveBadge => "active_badge",
 		}
 	}
 }
@@ -102,10 +108,18 @@ pub(super) fn plan_delivery(
 	room_id: &RoomId,
 	kind: &TimelineEventType,
 	actions: &[Action],
+	active_elsewhere: bool,
 ) -> Delivery {
 	let config = &self.services.config;
 	let highlight = actions.iter().any(Action::is_highlight);
-	let exempt = highlight || is_call_event(kind) || is_encrypted_event(kind);
+	let urgent = highlight || is_call_event(kind);
+	let exempt = urgent || is_encrypted_event(kind);
+
+	// Encrypted events are not exempt here: being active in that very room on
+	// another device means the user is reading it there, whatever it is.
+	if !urgent && active_elsewhere {
+		return Delivery::ActiveBadge;
+	}
 
 	if !exempt
 		&& config.push_quiet_badge_only
