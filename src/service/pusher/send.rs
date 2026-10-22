@@ -14,10 +14,10 @@ use ruma::{
 	push::{Action, HighlightTweakValue, HttpPusherData, PushFormat, Ruleset, Tweak},
 };
 use serde_json::Value;
-use tuwunel_core::{Result, err, error, implement, matrix::Event, trace, utils::BoolExt};
+use tuwunel_core::{Result, err, error, implement, info, matrix::Event, trace, utils::BoolExt};
 use url::Url;
 
-use super::Evaluate;
+use super::{Evaluate, throttle::Delivery};
 
 #[implement(super::Service)]
 #[tracing::instrument(level = "debug", skip_all)]
@@ -66,20 +66,47 @@ where
 		"Push notice decision",
 	);
 
-	if notify || self.services.config.push_everything {
-		let tweaks: Vec<Tweak> = actions
-			.iter()
-			.filter_map(|action| match action {
-				| Action::SetTweak(tweak) => Some(tweak.clone()),
-				| _ => None,
-			})
-			.collect();
-
-		self.send_notice(user_id, pusher, tweaks, event)
-			.await?;
+	if !notify && !self.services.config.push_everything {
+		return Ok(());
 	}
 
-	Ok(())
+	let delivery = if notify {
+		self.plan_delivery(user_id, &pusher.ids.pushkey, event.room_id(), event.kind(), actions)
+	} else {
+		Delivery::Full(None)
+	};
+
+	info!(
+		%user_id,
+		room_id = %event.room_id(),
+		event_id = %event.event_id(),
+		delivery = delivery.as_str(),
+		"Push delivery",
+	);
+
+	let Delivery::Full(reserved) = delivery else {
+		return self.send_badge_notice(user_id, pusher).await;
+	};
+
+	let tweaks: Vec<Tweak> = actions
+		.iter()
+		.filter_map(|action| match action {
+			| Action::SetTweak(tweak) => Some(tweak.clone()),
+			| _ => None,
+		})
+		.collect();
+
+	let result = self
+		.send_notice(user_id, pusher, tweaks, event)
+		.await;
+
+	if result.is_err()
+		&& let Some(reserved) = reserved
+	{
+		self.release_burst(user_id, &pusher.ids.pushkey, event.room_id(), reserved);
+	}
+
+	result
 }
 
 /// Send an account-wide counts-only notification to a push gateway.

@@ -2543,6 +2543,30 @@ pub struct Config {
 	#[serde(default)]
 	pub push_everything: bool,
 
+	/// Per room, send only the first push of a burst in full. A later
+	/// pushable event in the same room within this many seconds of the last
+	/// full push to the same pusher is sent as a counts-only (badge) update,
+	/// which a push gateway delivers without an alert. For Element X on iOS
+	/// that means its notification extension is not started for it.
+	///
+	/// Highlights (mentions) and call invites or rings always push in full and
+	/// restart the window. The badge still carries the current unread count.
+	/// 0 disables the throttle.
+	///
+	/// reloadable: yes
+	/// default: 0
+	#[serde(default)]
+	pub push_burst_window_s: u64,
+
+	/// Send a notification that has no sound tweak (and is not a highlight or
+	/// a call) as a counts-only (badge) update instead of a full push. With the
+	/// default push rules that covers messages in group rooms, while direct
+	/// messages, mentions, invites and calls still alert.
+	///
+	/// reloadable: yes
+	#[serde(default)]
+	pub push_quiet_badge_only: bool,
+
 	/// Evaluate the `im.nheko.msc3664.related_event_match` push rule condition,
 	/// which matches on a property of the event that an incoming event relates
 	/// to.
