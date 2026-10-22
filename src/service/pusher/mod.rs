@@ -2,6 +2,7 @@ mod active;
 mod append;
 mod badge;
 mod notification;
+mod pushed_media;
 mod request;
 mod send;
 mod suppressed;
@@ -103,6 +104,7 @@ pub struct Service {
 	sent_badges: SentBadges,
 	push_bursts: BurstWindows,
 	active_rooms: active::ActiveRooms,
+	pushed_media: pushed_media::PushedMedia,
 }
 
 struct Data {
@@ -135,6 +137,7 @@ impl crate::Service for Service {
 			sent_badges: SentBadges::default(),
 			push_bursts: BurstWindows::default(),
 			active_rooms: active::ActiveRooms::default(),
+			pushed_media: pushed_media::PushedMedia::default(),
 		}))
 	}
 
