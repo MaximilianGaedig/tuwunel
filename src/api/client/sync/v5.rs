@@ -27,7 +27,7 @@ use tokio::{
 	time::{Instant, timeout_at},
 };
 use tuwunel_core::{
-	Err, Result, debug,
+	Config, Err, Result, debug,
 	debug::INFO_SPAN_LEVEL,
 	debug_warn,
 	error::inspect_log,
@@ -59,6 +59,10 @@ struct SyncInfo<'a> {
 	///
 	/// Both the list filters and every room payload answer `is_dm` from this.
 	direct_rooms: &'a BTreeSet<OwnedRoomId>,
+
+	/// A notification client's connection (`sync_notification_lean`): it is
+	/// sent only the account data a notification needs.
+	notification: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -129,6 +133,7 @@ pub(crate) async fn sync_events_v5_route(
 		.map(|timeout: u64| timeout.min(services.config.client_sync_timeout_max))
 		.unwrap_or(0);
 
+	let notification = is_notification_connection(&services.config, request.conn_id.as_deref());
 	let conn_key = into_connection_key(sender_user, sender_device, request.conn_id.as_deref());
 	let conn_val = services
 		.sync
@@ -246,6 +251,7 @@ pub(crate) async fn sync_events_v5_route(
 			sender_device,
 			previous_connection_pos: since.ne(&0).then_some(since),
 			direct_rooms: &direct_rooms,
+			notification,
 		};
 
 		(window, response.lists) = selector::selector(&mut conn, sync_info)
@@ -299,6 +305,19 @@ pub(crate) async fn sync_events_v5_route(
 
 		conn.globalsince = conn.next_batch;
 	}
+}
+
+/// Whether the connection is a notification client's, which
+/// `sync_notification_lean` answers with less (see there for why that is
+/// safe).
+fn is_notification_connection(config: &Config, conn_id: Option<&str>) -> bool {
+	config.sync_notification_lean
+		&& conn_id.is_some_and(|conn_id| {
+			config
+				.sync_notification_conn_ids
+				.iter()
+				.any(|id| id == conn_id)
+		})
 }
 
 fn config_change_needs_position(
