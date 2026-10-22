@@ -4,6 +4,7 @@ mod notification;
 mod request;
 mod send;
 mod suppressed;
+mod throttle;
 #[cfg(test)]
 mod tests;
 
@@ -39,7 +40,7 @@ use tuwunel_core::{
 use tuwunel_database::{Database, Deserialized, Ignore, Interfix, Json, Map};
 use url::Url;
 
-use self::badge::SentBadges;
+use self::{badge::SentBadges, throttle::BurstWindows};
 pub use self::{
 	append::Notified,
 	suppressed::{SuppressedPushes, SuppressedRooms},
@@ -99,6 +100,7 @@ pub struct Service {
 	db: Data,
 	suppressed: suppressed::SuppressedQueue,
 	sent_badges: SentBadges,
+	push_bursts: BurstWindows,
 }
 
 struct Data {
@@ -129,6 +131,7 @@ impl crate::Service for Service {
 			},
 			suppressed: suppressed::SuppressedQueue::default(),
 			sent_badges: SentBadges::default(),
+			push_bursts: BurstWindows::default(),
 		}))
 	}
 
@@ -192,6 +195,7 @@ fn set_pusher_post(
 		.insert(pushkey, sender_device);
 
 	self.forget_sent_badge(sender, pushkey);
+	self.forget_bursts(sender, pushkey);
 
 	Ok(())
 }
@@ -229,6 +233,7 @@ pub async fn delete_pusher(&self, sender: &UserId, pushkey: &str) {
 	self.db.pushkey_deviceid.remove(pushkey);
 	self.clear_suppressed_pushkey(sender, pushkey);
 	self.forget_sent_badge(sender, pushkey);
+	self.forget_bursts(sender, pushkey);
 
 	self.services
 		.sending

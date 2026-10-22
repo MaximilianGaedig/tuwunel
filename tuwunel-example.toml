@@ -2156,6 +2156,29 @@
 #
 #push_everything = false
 
+# Per room, send only the first push of a burst in full. A later
+# pushable event in the same room within this many seconds of the last
+# full push to the same pusher is sent as a counts-only (badge) update,
+# which a push gateway delivers without an alert. For Element X on iOS
+# that means its notification extension is not started for it.
+#
+# Highlights (mentions) and call invites or rings always push in full and
+# restart the window. The badge still carries the current unread count.
+# 0 disables the throttle.
+#
+# reloadable: yes
+#
+#push_burst_window_s = 0
+
+# Send a notification that has no sound tweak (and is not a highlight or
+# a call) as a counts-only (badge) update instead of a full push. With the
+# default push rules that covers messages in group rooms, while direct
+# messages, mentions, invites and calls still alert.
+#
+# reloadable: yes
+#
+#push_quiet_badge_only = false
+
 # Evaluate the `im.nheko.msc3664.related_event_match` push rule condition,
 # which matches on a property of the event that an incoming event relates
 # to.
