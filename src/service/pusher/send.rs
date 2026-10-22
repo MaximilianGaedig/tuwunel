@@ -3,7 +3,7 @@ use futures::{
 	future::{join, join4},
 };
 use ruma::{
-	UInt, UserId,
+	RoomId, UInt, UserId,
 	api::{
 		client::push::{Pusher, PusherKind},
 		push_gateway::send_event_notification::v1::{
@@ -14,7 +14,9 @@ use ruma::{
 	push::{Action, HighlightTweakValue, HttpPusherData, PushFormat, Ruleset, Tweak},
 };
 use serde_json::Value;
-use tuwunel_core::{Result, err, error, implement, info, matrix::Event, trace, utils::BoolExt};
+use tuwunel_core::{
+	Result, debug, err, error, implement, info, matrix::Event, trace, utils::BoolExt,
+};
 use url::Url;
 
 use super::{Evaluate, throttle::Delivery};
@@ -71,7 +73,18 @@ where
 	}
 
 	let delivery = if notify {
-		self.plan_delivery(user_id, &pusher.ids.pushkey, event.room_id(), event.kind(), actions)
+		let active_elsewhere = self
+			.pusher_active_elsewhere(user_id, &pusher.ids.pushkey, event.room_id())
+			.await;
+
+		self.plan_delivery(
+			user_id,
+			&pusher.ids.pushkey,
+			event.room_id(),
+			event.kind(),
+			actions,
+			active_elsewhere,
+		)
 	} else {
 		Delivery::Full(None)
 	};
@@ -107,6 +120,27 @@ where
 	}
 
 	result
+}
+
+/// Whether the user is active in the room on a device other than the
+/// pusher's own. A pusher with no recorded device never counts as elsewhere.
+#[implement(super::Service)]
+async fn pusher_active_elsewhere(
+	&self,
+	user_id: &UserId,
+	pushkey: &str,
+	room_id: &RoomId,
+) -> bool {
+	if !self.any_room_activity(user_id, room_id) {
+		return false;
+	}
+
+	let Ok(device) = self.get_pusher_device(pushkey).await else {
+		debug!(%user_id, %room_id, "Pusher has no device; active-elsewhere not applied");
+		return false;
+	};
+
+	self.active_elsewhere(user_id, room_id, &device)
 }
 
 /// Send an account-wide counts-only notification to a push gateway.
@@ -150,9 +184,10 @@ async fn send_notice<Pdu: Event>(
 ) -> Result {
 	// TODO: email
 	match &pusher.kind {
-		| PusherKind::Http(http) =>
+		| PusherKind::Http(http) => {
 			self.send_http_event_notice(user_id, pusher, http, tweaks, event)
-				.await,
+				.await
+		},
 		// TODO: Handle email
 		//PusherKind::Email(_) => Ok(()),
 		| _ => Ok(()),

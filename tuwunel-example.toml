@@ -2179,6 +2179,24 @@
 #
 #push_quiet_badge_only = false
 
+# While the user is active in a room on another device, send that room's
+# pushes to this pusher as counts-only (badge) updates. Active means the
+# user sent an event or set a read receipt or marker in the room within
+# this many seconds from a device other than the pusher's own (or through
+# an appservice acting for them, such as a bridge relaying what they did
+# in the bridged network's app). For Element X on iOS a badge update does
+# not start the notification extension.
+#
+# Highlights (mentions) and call invites or rings always push in full.
+# Encrypted events are not exempt: the server cannot see a mention or a
+# call inside them, so an encrypted mention or ring in a room the user is
+# active in elsewhere is a badge too. A pusher registered before this
+# server recorded pusher devices is never affected. 0 disables it.
+#
+# reloadable: yes
+#
+#push_active_elsewhere_s = 0
+
 # Evaluate the `im.nheko.msc3664.related_event_match` push rule condition,
 # which matches on a property of the event that an incoming event relates
 # to.

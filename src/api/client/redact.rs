@@ -54,5 +54,12 @@ pub(crate) async fn redact_event_route(
 
 	drop(state_lock);
 
+	services.pusher.note_room_activity(
+		sender_user,
+		&body.room_id,
+		body.sender_device.as_deref(),
+		None,
+	);
+
 	Ok(redact_event::v3::Response { event_id })
 }
