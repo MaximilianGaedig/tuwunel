@@ -12,8 +12,11 @@
 //! - `push_quiet_badge_only`: a notification whose actions carry no sound tweak
 //!   only updates the badge.
 //!
-//! Highlights (mentions) and call invites or rings are exempt from both, and a
-//! full push sent for them restarts the window. Both policies are off by
+//! Highlights (mentions), call invites or rings and encrypted events are exempt
+//! from both, and a full push sent for them restarts the window. The server
+//! cannot see what an encrypted event is (a call, a mention, a plain message)
+//! nor whether the client's own rules would sound for it, so it is never
+//! reduced to a badge. Both policies are off by
 //! default.
 
 use std::{
@@ -74,6 +77,11 @@ impl BurstWindows {
 	}
 }
 
+/// Whether an event is encrypted: its real type and content are unknown here.
+pub(super) fn is_encrypted_event(kind: &TimelineEventType) -> bool {
+	*kind == TimelineEventType::RoomEncrypted
+}
+
 /// Whether an event type rings or starts a call.
 pub(super) fn is_call_event(kind: &TimelineEventType) -> bool {
 	let kind = kind.to_string();
@@ -97,7 +105,7 @@ pub(super) fn plan_delivery(
 ) -> Delivery {
 	let config = &self.services.config;
 	let highlight = actions.iter().any(Action::is_highlight);
-	let exempt = highlight || is_call_event(kind);
+	let exempt = highlight || is_call_event(kind) || is_encrypted_event(kind);
 
 	if !exempt
 		&& config.push_quiet_badge_only
