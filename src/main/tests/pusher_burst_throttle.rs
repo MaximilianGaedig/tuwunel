@@ -102,7 +102,7 @@ async fn run_cases(services: &Services) -> Result {
 		.create(&user, Some("password"), None)
 		.await?;
 
-	let rooms: Vec<_> = ["a", "b", "c", "d"]
+	let rooms: Vec<_> = ["a", "b", "c", "d", "e"]
 		.iter()
 		.map(|name| RoomId::parse(format!("!burst-{name}:{server_name}")))
 		.collect::<Result<_, _>>()?;
@@ -129,7 +129,7 @@ async fn run_cases(services: &Services) -> Result {
 		room_unread: HashMap::new(),
 	};
 
-	let [a, b, c, d] = [&rooms[0], &rooms[1], &rooms[2], &rooms[3]];
+	let [a, b, c, d, e] = [&rooms[0], &rooms[1], &rooms[2], &rooms[3], &rooms[4]];
 
 	// The first event of a burst goes out in full.
 	expect_full(&mut fx, a, "m.room.message", "hello", "$a1:x").await?;
@@ -155,6 +155,12 @@ async fn run_cases(services: &Services) -> Result {
 
 	// The quiet ones did not open a window: a sounding event there is full.
 	expect_full(&mut fx, c, "m.room.message", "hello", "$c3:x").await?;
+
+	// Encrypted events always push in full: the server cannot tell a call or a
+	// mention inside them, and their rule here sets no sound (as the default
+	// group-room rule for encrypted events does).
+	expect_full(&mut fx, e, "m.room.encrypted", "", "$e1:x").await?;
+	expect_full(&mut fx, e, "m.room.encrypted", "", "$e2:x").await?;
 
 	// The mention restarted room a's window: after the window has passed since
 	// the last full push the next event is full again, and the one after it
@@ -321,6 +327,12 @@ fn ruleset() -> Result<Ruleset> {
 			},
 		],
 		"underride": [{
+			"rule_id": "test.encrypted",
+			"default": false,
+			"enabled": true,
+			"conditions": [{"kind": "event_match", "key": "type", "pattern": "m.room.encrypted"}],
+			"actions": ["notify"],
+		}, {
 			"rule_id": "test.message",
 			"default": false,
 			"enabled": true,
@@ -338,6 +350,13 @@ fn event(room_id: &RoomId, kind: &str, body: &str, event_id: &str) -> Result<Pdu
 			"version": "1",
 			"lifetime": 60000,
 			"offer": {"type": "offer", "sdp": "v=0"},
+		}),
+		| "m.room.encrypted" => json!({
+			"algorithm": "m.megolm.v1.aes-sha2",
+			"ciphertext": "AwgAEnB...",
+			"device_id": "DEVICE",
+			"sender_key": "senderkey",
+			"session_id": "session",
 		}),
 		| _ => json!({"msgtype": "m.text", "body": body}),
 	};
