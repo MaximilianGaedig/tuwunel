@@ -62,7 +62,8 @@ fn each_type_is_served_once_with_its_latest_content() -> Result {
 		.with_option("address=[\"127.0.0.1\"]")
 		.with_option(format!("port={port}"))
 		.with_option("listening=true")
-		.with_option("allow_local_presence=false");
+		.with_option("allow_local_presence=false")
+		.with_option("allow_outgoing_presence=false");
 
 	let runtime = Runtime::new(Some(&args))?;
 	let server = Server::new(Some(&args), Some(&runtime))?;
