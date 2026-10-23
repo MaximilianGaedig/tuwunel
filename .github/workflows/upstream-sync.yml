@@ -1,0 +1,293 @@
+# Nightly upstream sync (MEO-199). Identical in every Matrix-stack fork except the env block below.
+#
+# Merges upstream's branch (merge commit, never a rebase) into auto/upstream-sync, which starts from our
+# deploy branch, and opens or updates the PR "Upstream sync <date>" against it. Once the workflows in
+# REQUIRED_WORKFLOWS pass on the sync commit, the PR is merged with a merge commit, which is the deploy for
+# repos whose base branch deploys. A merge that conflicts is never pushed: the issue "Upstream sync
+# conflict" lists the files and ntfy (topic `server`, forwarded to Matrix) says so. A failed or stuck CI
+# run notifies too and leaves the PR open.
+#
+# Secrets:
+#   NTFY_TOKEN  write token for ntfy topic `server`. Without it nothing is notified (a warning is logged).
+#   SYNC_TOKEN  optional fine-grained token (contents, pull requests, issues, workflows, actions: write).
+#               GitHub starts no push/pull_request workflows for pushes and PRs made with GITHUB_TOKEN, and
+#               GITHUB_TOKEN cannot push changes to .github/workflows. With SYNC_TOKEN the sync behaves like
+#               a person: CI runs by itself and upstream workflow changes merge. Without it the workflows in
+#               FALLBACK_WORKFLOWS are started by workflow_dispatch instead and are what must pass, a merge
+#               that touches .github/workflows is reported instead of pushed, and DEPLOY_WORKFLOWS are
+#               started on the base branch after the merge (a GITHUB_TOKEN merge triggers nothing).
+name: Upstream sync
+
+on:
+  schedule:
+    # GitHub cron is UTC: 02:xx UTC is 03:xx in Warsaw in winter (CET), 04:xx in summer (CEST).
+    - cron: "40 2 * * *"
+  workflow_dispatch:
+    inputs:
+      notify_test:
+        description: "Only send a test notification and stop"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: "matrix-construct/tuwunel"
+  UPSTREAM_BRANCH: "main"
+  BASE_BRANCH: "feat/appservice-account-data"
+  SYNC_BRANCH: auto/upstream-sync
+  # Workflow files (names in .github/workflows) that must pass on the sync commit. Empty: never merge.
+  REQUIRED_WORKFLOWS: "mxg-static.yml"
+  # Workflows that do not start by themselves on auto/upstream-sync and are always dispatched on it.
+  DISPATCH_WORKFLOWS: "mxg-static.yml"
+  # Without SYNC_TOKEN: dispatched on the sync branch and required instead of REQUIRED_WORKFLOWS. Empty: no
+  # merge without SYNC_TOKEN.
+  FALLBACK_WORKFLOWS: "mxg-static.yml"
+  # Without SYNC_TOKEN: started on the base branch after the merge, since that push triggers nothing.
+  DEPLOY_WORKFLOWS: "mxg-static.yml"
+  AUTO_MERGE: "true"
+  CI_TIMEOUT_MIN: "90"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.BASE_BRANCH }}
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - name: Sync
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN || github.token }}
+          HAVE_SYNC_TOKEN: ${{ secrets.SYNC_TOKEN != '' }}
+          NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
+          NOTIFY_TEST: ${{ inputs.notify_test || false }}
+        run: |
+          set -euo pipefail
+          repo=$GITHUB_REPOSITORY
+          run_url="$GITHUB_SERVER_URL/$repo/actions/runs/$GITHUB_RUN_ID"
+          today=$(TZ=Europe/Warsaw date +%F)
+          name=${repo#*/}
+          issue_title="Upstream sync conflict"
+          tmp=$(mktemp -d)
+
+          notify() { # title message click
+            local tok=${NTFY_TOKEN//[$'\t\r\n ']/}
+            if [ -z "$tok" ]; then echo "::warning::NTFY_TOKEN is not set, not notifying: $1"; return 0; fi
+            jq -n --arg title "$1" --arg message "$2" --arg click "$3" \
+              '{topic:"server",title:$title,message:$message,click:$click,tags:["arrows_counterclockwise"]}' > "$tmp/ntfy.json"
+            # JSON publishing goes to the server root; the token reaches curl through a header file, not argv.
+            curl -fsS -m 20 -o /dev/null -H @<(printf 'Authorization: Bearer %s\n' "$tok") \
+              -H 'Content-Type: application/json' --data-binary @"$tmp/ntfy.json" https://ntfy.maximiliangaedig.com/ \
+              || echo "::warning::ntfy publish failed"
+          }
+
+          if [ "$NOTIFY_TEST" = true ]; then
+            notify "$name: upstream sync test" "Test notification from the upstream sync workflow." "$run_url"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/$UPSTREAM_REPO.git"
+          git fetch --no-tags -q upstream "$UPSTREAM_BRANCH"
+          git fetch --no-tags -q origin "$BASE_BRANCH"
+          up=$(git rev-parse "upstream/$UPSTREAM_BRANCH")
+          base=$(git rev-parse "origin/$BASE_BRANCH")
+          up_short=${up:0:9}
+
+          open_issue() { gh issue list --repo "$repo" --state open --search "in:title \"$issue_title\"" \
+            --json number,title,body --jq "[.[] | select(.title == \"$issue_title\")][0] // empty"; }
+          close_issue() { # comment
+            local n; n=$(open_issue | jq -r '.number // empty')
+            [ -z "$n" ] || gh issue close "$n" --repo "$repo" --comment "$1"
+          }
+          report_blocked() { # reason files
+            local reason=$1 files=$2 key n url
+            key=$(printf '%s\n%s' "$reason" "$files" | sha256sum | cut -c1-16)
+            {
+              echo "The nightly sync could not merge \`$UPSTREAM_REPO\` \`$UPSTREAM_BRANCH\` (\`$up_short\`) into \`$BASE_BRANCH\` (\`${base:0:9}\`). Nothing was pushed."
+              echo
+              echo "**Why:** $reason"
+              echo
+              echo '```text'; printf '%s\n' "$files"; echo '```'
+              echo
+              echo "Resolve by hand, then let the next nightly run (or a manual run) carry on from the branch:"
+              echo
+              echo '```sh'
+              echo "git fetch origin $BASE_BRANCH && git fetch https://github.com/$UPSTREAM_REPO.git $UPSTREAM_BRANCH"
+              echo "git checkout -B $SYNC_BRANCH origin/$BASE_BRANCH   # or origin/$SYNC_BRANCH if it exists"
+              echo "git merge --no-ff FETCH_HEAD   # resolve, commit"
+              echo "git push origin $SYNC_BRANCH"
+              echo '```'
+              echo
+              echo "The sync builds on \`$SYNC_BRANCH\` when it exists, so a resolution pushed there is kept. Run: $run_url"
+              echo
+              echo "<!-- sync-key: $key -->"
+            } > "$tmp/issue.md"
+            n=$(open_issue | jq -r '.number // empty')
+            if [ -z "$n" ]; then
+              url=$(gh issue create --repo "$repo" --title "$issue_title" --body-file "$tmp/issue.md")
+              notify "$name: upstream sync conflict" "$reason"$'\n'"$(printf '%s\n' "$files" | head -15)" "$url"
+            else
+              url="$GITHUB_SERVER_URL/$repo/issues/$n"
+              old=$(open_issue | jq -r '.body' | sed -n 's/.*<!-- sync-key: \([0-9a-f]*\) -->.*/\1/p')
+              gh issue edit "$n" --repo "$repo" --body-file "$tmp/issue.md" > /dev/null
+              # Same conflict as last night: the issue is updated silently instead of paging again.
+              if [ "$old" != "$key" ]; then
+                gh issue comment "$n" --repo "$repo" --body "The conflict changed at upstream \`$up_short\`: see the updated description."
+                notify "$name: upstream sync conflict changed" "$reason"$'\n'"$(printf '%s\n' "$files" | head -15)" "$url"
+              fi
+            fi
+            echo "::warning::$reason ($url)"
+          }
+
+          # Carry on from the sync branch while it holds unmerged work (a nightly merge waiting for CI, or a
+          # conflict resolution pushed by hand); start fresh from the base once it has been merged.
+          start=$base existing=""
+          if git fetch --no-tags -q origin "$SYNC_BRANCH" 2>/dev/null \
+             && ! git merge-base --is-ancestor "origin/$SYNC_BRANCH" "$base"; then
+            existing=$(git rev-parse "origin/$SYNC_BRANCH"); start=$existing
+          fi
+          if git merge-base --is-ancestor "$up" "$start"; then
+            if git merge-base --is-ancestor "$up" "$base"; then
+              echo "Nothing new upstream at $up_short."
+              close_issue "Upstream \`$up_short\` is merged into \`$BASE_BRANCH\`."
+              exit 0
+            fi
+          fi
+
+          git checkout -q -B "$SYNC_BRANCH" "$start"
+          for target in "origin/$BASE_BRANCH" "upstream/$UPSTREAM_BRANCH"; do
+            [ "$target" != "origin/$BASE_BRANCH" ] || [ -n "$existing" ] || continue
+            if ! git merge --no-ff --no-edit -m "Merge $target ($(git rev-parse --short=9 "$target")) into $SYNC_BRANCH" "$target" > "$tmp/merge.log" 2>&1; then
+              files=$(git diff --name-only --diff-filter=U || true)
+              [ -n "$files" ] || files=$(tail -20 "$tmp/merge.log")
+              git merge --abort 2>/dev/null || true
+              report_blocked "merging $target conflicts." "$files"
+              exit 0
+            fi
+          done
+          head=$(git rev-parse HEAD)
+
+          wf_changed=$(git diff --name-only "$start" HEAD -- .github/workflows)
+          if [ "$HAVE_SYNC_TOKEN" != true ] && [ -n "$wf_changed" ]; then
+            report_blocked "upstream changed workflow files, which GITHUB_TOKEN may not push. Add the SYNC_TOKEN secret or merge by hand." "$wf_changed"
+            exit 0
+          fi
+
+          pushed=false
+          if [ "$head" != "$existing" ]; then
+            git push -q origin "HEAD:refs/heads/$SYNC_BRANCH"
+            pushed=true
+          fi
+          close_issue "Merged cleanly at upstream \`$up_short\`; see the \`$SYNC_BRANCH\` pull request."
+
+          # Commit subjects go in a code block: @mentions and #refs in upstream's messages must not ping anyone.
+          behind=$(git rev-list --count --no-merges "$base..$up")
+          if [ "$HAVE_SYNC_TOKEN" = true ]; then required=$REQUIRED_WORKFLOWS; else required=$FALLBACK_WORKFLOWS; fi
+          {
+            echo "Nightly merge of \`$UPSTREAM_REPO\` \`$UPSTREAM_BRANCH\` (\`$up_short\`) into \`$BASE_BRANCH\`: $behind upstream commits."
+            echo
+            if [ "$AUTO_MERGE" = true ] && [ -n "$required" ]; then
+              echo "Merges itself (merge commit) once these pass on \`${head:0:9}\`: \`$required\`."
+            elif [ "$AUTO_MERGE" = true ]; then
+              echo "Not merged automatically: no CI can run on this PR without the SYNC_TOKEN secret. Merge by hand (merge commit, not squash)."
+            else
+              echo "Not merged automatically in this repo. Merge by hand with a merge commit, not squash."
+            fi
+            echo
+            echo "<details><summary>Upstream commits</summary>"
+            echo
+            echo '```text'
+            git log -n 300 --no-merges --format='%h %s' "$base..$up" | sed 's/```/` ` `/g'
+            echo '```'
+            echo "</details>"
+            echo
+            echo "Run: $run_url"
+          } > "$tmp/pr.md"
+          pr_title="Upstream sync $today"
+          pr=$(gh pr list --repo "$repo" --head "$SYNC_BRANCH" --base "$BASE_BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [ -z "$pr" ]; then
+            url=$(gh pr create --repo "$repo" --base "$BASE_BRANCH" --head "$SYNC_BRANCH" --title "$pr_title" --body-file "$tmp/pr.md")
+            pr=${url##*/}
+          else
+            gh pr edit "$pr" --repo "$repo" --title "$pr_title" --body-file "$tmp/pr.md" > /dev/null
+            url="$GITHUB_SERVER_URL/$repo/pull/$pr"
+          fi
+          echo "PR: $url"
+
+          [ "$AUTO_MERGE" = true ] && [ -n "$required" ] || { echo "Not merging automatically."; exit 0; }
+
+          if [ "$pushed" = true ]; then
+            todo=$DISPATCH_WORKFLOWS
+            [ "$HAVE_SYNC_TOKEN" = true ] || todo="$todo $FALLBACK_WORKFLOWS"
+            for wf in $(printf '%s\n' $todo | sort -u); do
+              gh workflow run "$wf" --repo "$repo" --ref "$SYNC_BRANCH"
+            done
+          fi
+
+          # Wait for every required workflow's newest run on the sync commit.
+          deadline=$((SECONDS + CI_TIMEOUT_MIN * 60))
+          while :; do
+            gh api "repos/$repo/actions/runs?head_sha=$head&per_page=100" \
+              --jq '.workflow_runs[] | [(.path | sub("^.*/"; "") | sub("@.*$"; "")), .id, .status, (.conclusion // "")] | @tsv' \
+              > "$tmp/runs.tsv"
+            pending="" failed=""
+            for wf in $required; do
+              line=$(awk -F'\t' -v wf="$wf" '$1 == wf' "$tmp/runs.tsv" | sort -t$'\t' -k2,2n | tail -1)
+              if [ -z "$line" ] || [ "$(cut -f3 <<< "$line")" != completed ]; then pending="$pending $wf"; continue; fi
+              case "$(cut -f4 <<< "$line")" in success|skipped|neutral) ;; *) failed="$failed $wf" ;; esac
+            done
+            [ -z "$failed" ] || break
+            [ -n "$pending" ] || break
+            if [ "$SECONDS" -ge "$deadline" ]; then break; fi
+            sleep 60
+          done
+
+          if [ -n "$failed" ] || [ -n "$pending" ]; then
+            msg="CI on ${head:0:9}:${failed:+ failed:$failed}${pending:+ still pending after ${CI_TIMEOUT_MIN} min:$pending}. The PR stays open."
+            echo "::warning::$msg"
+            # Page once per sync commit, not every night for the same red run.
+            if [ "$pushed" = true ] || [ -n "$pending" ]; then
+              gh pr comment "$pr" --repo "$repo" --body "$msg Run: $run_url"
+              notify "$name: upstream sync CI failed" "$msg" "$url"
+            fi
+            exit 0
+          fi
+
+          if ! gh pr merge "$pr" --repo "$repo" --merge --match-head-commit "$head" \
+               --subject "Upstream sync $today (#$pr)" > "$tmp/merge-pr.log" 2>&1; then
+            cat "$tmp/merge-pr.log"
+            notify "$name: upstream sync merge failed" "CI passed but the merge was refused: $(head -c 300 "$tmp/merge-pr.log")" "$url"
+            exit 0
+          fi
+          gh api -X DELETE "repos/$repo/git/refs/heads/$SYNC_BRANCH" > /dev/null || true
+          echo "Merged $url"
+          if [ "$HAVE_SYNC_TOKEN" != true ]; then
+            for wf in $DEPLOY_WORKFLOWS; do gh workflow run "$wf" --repo "$repo" --ref "$BASE_BRANCH"; done
+          fi
+
+      - name: Notify on an unexpected failure
+        if: failure()
+        env:
+          NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
+        run: |
+          tok=${NTFY_TOKEN//[$'\t\r\n ']/}
+          [ -n "$tok" ] || exit 0
+          url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          jq -n --arg title "${GITHUB_REPOSITORY#*/}: upstream sync job failed" --arg click "$url" \
+            '{topic:"server",title:$title,message:"The upstream sync workflow itself failed; see the run.",click:$click,tags:["arrows_counterclockwise"]}' |
+            curl -fsS -m 20 -o /dev/null -H @<(printf 'Authorization: Bearer %s\n' "$tok") \
+              -H 'Content-Type: application/json' --data-binary @- https://ntfy.maximiliangaedig.com/
