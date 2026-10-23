@@ -14,10 +14,6 @@
 //! after this device shared a room key, which matrix-rust-sdk backs up only
 //! when an e2ee answer arrives.
 
-#[expect(
-	dead_code,
-	reason = "the shared client harness exposes helpers used by sibling integration tests"
-)]
 mod client;
 
 use std::{
