@@ -107,11 +107,12 @@ jobs:
           base=$(git rev-parse "origin/$BASE_BRANCH")
           up_short=${up:0:9}
 
+          # Issues may be switched off in a fork: then ntfy is the only report, and the job goes on.
           open_issue() { gh issue list --repo "$repo" --state open --search "in:title \"$issue_title\"" \
-            --json number,title,body --jq "[.[] | select(.title == \"$issue_title\")][0] // empty"; }
+            --json number,title,body --jq "[.[] | select(.title == \"$issue_title\")][0] // empty" 2>/dev/null || true; }
           close_issue() { # comment
             local n; n=$(open_issue | jq -r '.number // empty')
-            [ -z "$n" ] || gh issue close "$n" --repo "$repo" --comment "$1"
+            [ -z "$n" ] || gh issue close "$n" --repo "$repo" --comment "$1" || true
           }
           report_blocked() { # reason files
             local reason=$1 files=$2 key n url
@@ -138,15 +139,18 @@ jobs:
             } > "$tmp/issue.md"
             n=$(open_issue | jq -r '.number // empty')
             if [ -z "$n" ]; then
-              url=$(gh issue create --repo "$repo" --title "$issue_title" --body-file "$tmp/issue.md")
+              if ! url=$(gh issue create --repo "$repo" --title "$issue_title" --body-file "$tmp/issue.md"); then
+                echo "::warning::could not open the issue (are issues enabled?); notifying only"
+                url=$run_url
+              fi
               notify "$name: upstream sync conflict" "$reason"$'\n'"$(printf '%s\n' "$files" | head -15)" "$url"
             else
               url="$GITHUB_SERVER_URL/$repo/issues/$n"
               old=$(open_issue | jq -r '.body' | sed -n 's/.*<!-- sync-key: \([0-9a-f]*\) -->.*/\1/p')
-              gh issue edit "$n" --repo "$repo" --body-file "$tmp/issue.md" > /dev/null
+              gh issue edit "$n" --repo "$repo" --body-file "$tmp/issue.md" > /dev/null || true
               # Same conflict as last night: the issue is updated silently instead of paging again.
               if [ "$old" != "$key" ]; then
-                gh issue comment "$n" --repo "$repo" --body "The conflict changed at upstream \`$up_short\`: see the updated description."
+                gh issue comment "$n" --repo "$repo" --body "The conflict changed at upstream \`$up_short\`: see the updated description." || true
                 notify "$name: upstream sync conflict changed" "$reason"$'\n'"$(printf '%s\n' "$files" | head -15)" "$url"
               fi
             fi
