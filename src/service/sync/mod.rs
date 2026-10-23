@@ -6,8 +6,8 @@ mod watch;
 mod tests;
 
 use std::{
-	collections::{BTreeMap, btree_map::Entry},
-	sync::Arc,
+	collections::{BTreeMap, HashMap, btree_map::Entry},
+	sync::{Arc, Mutex as StdMutex},
 };
 
 use futures::{FutureExt, Stream};
@@ -39,6 +39,14 @@ pub struct Service {
 	/// Which rooms were written to since the process started, so an
 	/// incremental sync can leave the others alone.
 	pub activity: Arc<Activity>,
+
+	/// When each device last sent to-device messages, as a global count.
+	///
+	/// A device that shares a new room key sends it to-device, and
+	/// matrix-rust-sdk backs that key up only once an e2ee sliding sync answer
+	/// arrives; see [`Service::to_device_sent_since`]. In memory only: after a
+	/// restart every poll answers once anyway.
+	to_device_sent: StdMutex<HashMap<(OwnedUserId, OwnedDeviceId), u64>>,
 }
 
 struct Data {
@@ -167,10 +175,36 @@ impl crate::Service for Service {
 			},
 			services: args.services.clone(),
 			connections: Default::default(),
+			to_device_sent: Default::default(),
 		}))
 	}
 
 	fn name(&self) -> &str { crate::service::make_name(std::module_path!()) }
+}
+
+/// Record that a device just sent to-device messages.
+///
+/// The count is reserved fresh, so it is above every position a poll of that
+/// device has already been answered or woken at.
+#[implement(Service)]
+pub fn note_to_device_sent(&self, user_id: &UserId, device_id: &DeviceId) {
+	let count = *self.services.globals.next_count();
+
+	self.to_device_sent
+		.lock()
+		.expect("locked")
+		.insert((user_id.to_owned(), device_id.to_owned()), count);
+}
+
+/// Whether a device sent to-device messages after the position `since`.
+#[implement(Service)]
+#[must_use]
+pub fn to_device_sent_since(&self, user_id: &UserId, device_id: &DeviceId, since: u64) -> bool {
+	self.to_device_sent
+		.lock()
+		.expect("locked")
+		.get(&(user_id.to_owned(), device_id.to_owned()))
+		.is_some_and(|&sent| sent > since)
 }
 
 /// Whether the activity record can say, for a sync resuming from `since`,
