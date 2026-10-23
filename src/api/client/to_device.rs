@@ -148,6 +148,14 @@ pub(crate) async fn send_event_to_device_route(
 		}
 	}
 
+	// A sliding sync poll of this device answers its next woken pass with the
+	// e2ee extension, so a room key just shared gets backed up (MEO-200).
+	if let Some(sender_device) = sender_device {
+		services
+			.sync
+			.note_to_device_sent(sender_user, sender_device);
+	}
+
 	// Save transaction id with empty data
 	services
 		.transaction_ids

@@ -273,7 +273,13 @@ pub(crate) async fn sync_events_v5_route(
 			response.rooms = ranges.into_payloads();
 			response.extensions = extensions.into_response(&response.rooms);
 
-			if !is_empty_response(&response) {
+			let key_shared = sender_device.is_some_and(|device| {
+				services
+					.sync
+					.to_device_sent_since(sender_user, device, conn.globalsince)
+			});
+
+			if !is_empty_response(&mut response, key_shared) {
 				response.pos = conn.next_batch.to_string().into();
 				trace!(conn.globalsince, conn.next_batch, "response {response:?}");
 				conn.store(&services.sync, &conn_key);
@@ -333,13 +339,99 @@ fn config_change_needs_position(
 /// `next_batch`.
 fn is_retarding(since: u64, next_batch: u64) -> bool { since != 0 && since < next_batch }
 
-fn is_empty_response(response: &Response) -> bool {
-	response.extensions.is_empty() && response.rooms.is_empty()
+/// Whether a pass has nothing to answer the client with (MEO-200).
+///
+/// The e2ee extension reports the device's unused fallback key types on every
+/// pass. They are current state, not news, and any write on the server (a
+/// first pass) or anything in any of the user's rooms (a woken pass) starts a
+/// pass, so counting them made a connection with the e2ee extension answer
+/// every second or two on a busy account instead of waiting out its poll.
+/// Element X's `encryption` connection asks for nothing else.
+///
+/// They do answer a pass when this device sent to-device messages since the
+/// connection's position (`key_shared`): that is how a room key is shared,
+/// and matrix-rust-sdk backs a new key up only when an e2ee answer arrives.
+/// Upstream (tuwunel #658) answers every woken pass with them for that
+/// reason; here only the device's own key share does. The types stay in the
+/// response either way, so a poll that times out still delivers them.
+fn is_empty_response(response: &mut Response, key_shared: bool) -> bool {
+	let fallback_key_types = response
+		.extensions
+		.e2ee
+		.device_unused_fallback_key_types
+		.take(); // Extensions::is_empty cannot skip one field
+
+	let empty = response.extensions.is_empty()
+		&& response.rooms.is_empty()
+		&& (!key_shared || fallback_key_types.is_none());
+
+	response
+		.extensions
+		.e2ee
+		.device_unused_fallback_key_types = fallback_key_types;
+
+	empty
 }
 
 #[cfg(test)]
 mod tests {
-	use super::{config_change_needs_position, is_retarding};
+	use ruma::{
+		OneTimeKeyAlgorithm,
+		api::client::sync::sync_events::{
+			DeviceLists,
+			v5::{Response, response::E2EE},
+		},
+		owned_user_id,
+	};
+
+	use super::{config_change_needs_position, is_empty_response, is_retarding};
+
+	fn e2ee_response(e2ee: E2EE) -> Response {
+		let mut response = Response::new(Default::default());
+		response.extensions.e2ee = e2ee;
+		response
+	}
+
+	#[test]
+	fn unused_fallback_key_types_alone_are_empty() {
+		for types in [vec![], vec![OneTimeKeyAlgorithm::SignedCurve25519]] {
+			let mut response = e2ee_response(E2EE {
+				device_unused_fallback_key_types: Some(types.clone()),
+				..Default::default()
+			});
+
+			assert!(is_empty_response(&mut response, false));
+			assert_eq!(
+				response
+					.extensions
+					.e2ee
+					.device_unused_fallback_key_types,
+				Some(types.clone()),
+				"the types are still delivered"
+			);
+
+			assert!(
+				!is_empty_response(&mut response, true),
+				"a key this device shared answers with the types"
+			);
+
+			let mut changed = e2ee_response(E2EE {
+				device_unused_fallback_key_types: Some(types),
+				device_lists: DeviceLists {
+					changed: vec![owned_user_id!("@changed:example.org")],
+					..Default::default()
+				},
+				..Default::default()
+			});
+
+			assert!(!is_empty_response(&mut changed, false));
+		}
+
+		assert!(
+			is_empty_response(&mut e2ee_response(E2EE::default()), true),
+			"a key share with no e2ee extension asked for is still nothing"
+		);
+	}
 
 	#[test]
 	fn every_earlier_position_can_be_resumed() {
