@@ -37,9 +37,10 @@ use tuwunel_core::{
 			Digest as Sha256Digest, delimited as sha256_delimited, hash as sha256_hash,
 		},
 		math::usize_from_ruma,
-		result::FlatOk,
+		result::{FlatOk, NotFound},
 		stream::{BroadbandExt, WidebandExt},
 	},
+	warn,
 };
 use tuwunel_service::{
 	Services,
@@ -48,7 +49,7 @@ use tuwunel_service::{
 
 use self::{bump_stamp::room_bump_stamp, heroes::calculate_heroes};
 use super::{
-	super::{load_timeline_fallible, strip_prev_state},
+	super::{load_timeline_fallible, stand_in_leave, strip_prev_state},
 	Connection, ListIds, SyncInfo, WindowRoom,
 	activity::{is_preview_pdu, newest_said_event},
 };
@@ -119,7 +120,9 @@ pub(super) async fn handle_room(
 
 	let (timeline_limit, required_state) = room_details;
 
-	let timeline = is_outside.is_false().then_async(|| {
+	// Like the required state below, the timeline is withheld from an invitee or
+	// a knocker.
+	let timeline = membership_allows_required_state(membership.as_ref()).then_async(|| {
 		load_timeline_fallible(
 			services,
 			sender_user,
@@ -329,14 +332,21 @@ async fn leave_or_ban_response(
 	WindowRoom { lists, membership, room_id, .. }: &WindowRoom,
 	roomsince: u64,
 ) -> Result<response::Room> {
-	// A rejected federated invite has no resolved state; the retraction still
-	// delivers on the membership alone.
+	// Clients read the departure from this event, not `membership`.
 	let member_event = services
 		.state_accessor
 		.room_state_get(room_id, &StateEventType::RoomMember, sender_user.as_str())
 		.map_ok(Event::into_format)
 		.await
-		.ok();
+		.optional()
+		.inspect_err(|error| warn!(%room_id, %error, "Unreadable own departure event"))
+		.ok()
+		.flatten()
+		.or_else(|| {
+			matches!(membership, Some(MembershipState::Leave))
+				.then(|| stand_in_leave(services, room_id, sender_user))
+				.and_then(Result::ok)
+		});
 
 	Ok(response::Room {
 		initial: roomsince.eq(&0).then_some(true),
