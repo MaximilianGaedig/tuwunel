@@ -71,11 +71,7 @@ async fn exercise(services: &Services) -> Result {
 		.user_membership_at_pdu(reader, &message)
 		.await;
 
-	assert_ne!(
-		membership,
-		MembershipState::Leave,
-		"unknown state must not be reported as a membership"
-	);
+	assert_eq!(membership, None, "unknown state must not be reported as a membership");
 
 	// The reader's own member event still carries its membership.
 	let invite = pdu(json!({
@@ -91,7 +87,7 @@ async fn exercise(services: &Services) -> Result {
 		.user_membership_at_pdu(reader, &invite)
 		.await;
 
-	assert_eq!(membership, MembershipState::Invite);
+	assert_eq!(membership, Some(MembershipState::Invite));
 
 	Ok(())
 }
