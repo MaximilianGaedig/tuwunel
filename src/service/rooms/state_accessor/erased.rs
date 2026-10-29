@@ -107,7 +107,8 @@ pub async fn erased_view(&self, user_id: &UserId, pdu: &Pdu) -> Option<Pdu> {
 }
 
 /// MSC4025: whether `pdu` serves pruned to `user_id`: its sender is erased
-/// and the recipient was not joined in the room state at the event.
+/// and the recipient was not joined in the room state at the event. Unknown
+/// state at the event counts as not joined.
 ///
 /// The erasure check runs first and alone: it is a point get that is almost
 /// always false, while the membership read is a state lookup that only an
@@ -117,7 +118,7 @@ pub async fn erased_for(&self, user_id: &UserId, pdu: &Pdu) -> bool {
 	self.services.users.is_erased(pdu.sender()).await
 		&& self
 			.user_membership_at_pdu(user_id, pdu)
-			.map(|membership| membership.ne(&MembershipState::Join))
+			.map(|membership| membership.ne(&Some(MembershipState::Join)))
 			.await
 }
 

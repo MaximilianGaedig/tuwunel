@@ -447,10 +447,13 @@ pub(crate) async fn annotate_membership(
 		return;
 	}
 
-	let membership = services
+	let Some(membership) = services
 		.state_accessor
 		.user_membership_at_pdu(user_id, pdu)
-		.await;
+		.await
+	else {
+		return;
+	};
 
 	pdu.add_membership(&membership).log_err().ok();
 }

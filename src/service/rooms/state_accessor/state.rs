@@ -73,28 +73,34 @@ pub async fn user_membership(
 /// MSC4115: the user's room membership "just after" the given PDU landed.
 ///
 /// `pdu_shortstatehash` returns state-before-the-event, so a member event
-/// targeting `user_id` overrides that lookup with its own content. Missing or
-/// invalid state falls back to [`MembershipState::Leave`].
+/// targeting `user_id` overrides that lookup with its own content. `None` when
+/// this server holds no state at the event, as for events sent before it joined
+/// the room: reporting `leave` there tells clients the user was not a member
+/// (MEO-206), and MSC4115 has the property omitted when it is not known.
 #[implement(super::Service)]
-pub async fn user_membership_at_pdu(&self, user_id: &UserId, pdu: &Pdu) -> MembershipState {
+pub async fn user_membership_at_pdu(
+	&self,
+	user_id: &UserId,
+	pdu: &Pdu,
+) -> Option<MembershipState> {
 	if pdu.kind() == &TimelineEventType::RoomMember
 		&& pdu.state_key() == Some(user_id.as_str())
 		&& let Ok(content) = pdu.get_content::<RoomMemberEventContent>()
 	{
-		return content.membership;
+		return Some(content.membership);
 	}
 
-	let Ok(shortstatehash) = self
+	let shortstatehash = self
 		.services
 		.state
 		.pdu_shortstatehash(pdu.event_id())
 		.await
-	else {
-		return MembershipState::Leave;
-	};
+		.ok()?;
 
-	self.user_membership(shortstatehash, user_id)
-		.await
+	Some(
+		self.user_membership(shortstatehash, user_id)
+			.await,
+	)
 }
 
 /// Deserializes one event's content from a selected state snapshot.
