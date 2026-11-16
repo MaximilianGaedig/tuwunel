@@ -444,6 +444,7 @@ fn register_client_media_index_routes(router: Router<State>) -> Router<State> {
 		.ruma_route(&client::get_storage_route)
 		.ruma_route(&client::get_user_activity_route)
 		.ruma_route(&client::put_user_seen_route)
+		.ruma_route(&client::set_media_source_route)
 		.ruma_route(&client::get_room_export_events_route)
 		.ruma_route(&client::get_room_export_media_route)
 }

@@ -3,13 +3,9 @@
 use std::{sync::Arc, time::Duration};
 
 use bytes::Bytes;
-use futures::{StreamExt, pin_mut};
 use ruma::{Mxc, UserId, http_headers::ContentDisposition};
 use tokio::{sync::Notify, time::timeout};
-use tuwunel_core::{
-	Err, Result, async_noinline, err, implement,
-	utils::{result::LogDebugErr, stream::IterStream},
-};
+use tuwunel_core::{Err, Result, async_noinline, err, implement};
 
 #[cfg(feature = "media_thumbnail")]
 use super::generate::picture_dim;
@@ -317,24 +313,7 @@ pub(super) async fn fetch_bytes(&self, key: &[u8]) -> Result<Bytes> {
 	#[cfg(all(test, feature = "media_thumbnail"))]
 	source_fetched();
 
-	let path = self.get_media_name_sha256(key);
-	let fetch = self
-		.storage_providers()
-		.stream()
-		.filter_map(async |provider| {
-			provider
-				.get(path.as_str())
-				.await
-				.log_debug_err()
-				.ok()
-		});
-
-	pin_mut!(fetch);
-
-	fetch
-		.next()
-		.await
-		.ok_or_else(|| err!(Request(NotFound("Media not found."))))
+	self.read_stored(key).await
 }
 /// Answers a request from a stored row, re-deriving a still if it animates.
 ///

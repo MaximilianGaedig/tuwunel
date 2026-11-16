@@ -27,6 +27,7 @@ pub(crate) struct Data {
 	mediaid_lazy: Arc<Map>,
 	mediaid_lazycontent: Arc<Map>,
 	mediaid_pending: Arc<Map>,
+	mediaid_source: Arc<Map>,
 	mediaid_user: Arc<Map>,
 	url_preview: Arc<Map>,
 }
@@ -80,6 +81,7 @@ impl Data {
 			mediaid_lazy: db["mediaid_lazy"].clone(),
 			mediaid_lazycontent: db["mediaid_lazycontent"].clone(),
 			mediaid_pending: db["mediaid_pending"].clone(),
+			mediaid_source: db["mediaid_source"].clone(),
 			mediaid_user: db["mediaid_user"].clone(),
 			url_preview: db["url_preview"].clone(),
 		}
@@ -238,7 +240,7 @@ impl Data {
 			})
 			.await;
 
-		let txn = self
+		let mut txn = self
 			.mediaid_user
 			.stream_prefix_raw(&prefix)
 			.ignore_err()
@@ -257,7 +259,24 @@ impl Data {
 			})
 			.await;
 
+		txn.del_raw(&self.mediaid_source, mxc.to_string());
 		txn.execute();
+	}
+
+	/// Where the bytes of a local mxc are fetched from once its file is gone
+	/// (`Service::set_source`): the source's own mxc:// URI.
+	pub(super) async fn get_source(&self, mxc: &str) -> Result<String> {
+		let source = self.mediaid_source.get(mxc).await?;
+
+		string_from_bytes(&source)
+			.map_err(|e| err!(Database(error!(?mxc, "Media source is invalid: {e}"))))
+	}
+
+	pub(super) fn set_source(&self, mxc: &str, source: Option<&str>) {
+		match source {
+			| Some(source) => self.mediaid_source.insert(mxc, source.as_bytes()),
+			| None => self.mediaid_source.remove(mxc),
+		}
 	}
 
 	/// Searches for all files with the given MXC

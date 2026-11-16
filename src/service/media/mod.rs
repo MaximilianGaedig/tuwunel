@@ -2,6 +2,7 @@ mod data;
 pub(super) mod migrations;
 mod preview;
 mod remote;
+mod source;
 mod tests;
 mod thumbnail;
 #[cfg(feature = "media_thumbnail")]
@@ -44,6 +45,7 @@ use self::{data::Data, preview::Agent, remote::Fetch, thumbnail::sequence};
 pub use self::{
 	data::Metadata,
 	preview::UrlPreviewData,
+	source::SourceFile,
 	thumbnail::{Animate, Dim},
 };
 use crate::storage::Provider;
@@ -123,6 +125,9 @@ pub const CACHE_CONTROL_IMMUTABLE: &str = "private,max-age=31536000,immutable";
 
 /// Default cross-origin resource policy.
 pub const CORP_CROSS_ORIGIN: &str = "cross-origin";
+
+/// How long a dropped file's source may take to start answering.
+const SOURCE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Validity window for a presigned media download redirect (MSC3860).
 const REDIRECT_TTL: Duration = Duration::from_mins(5);
@@ -469,22 +474,7 @@ impl Service {
 			return Box::pin(self.fetch_lazy_media(mxc)).await;
 		};
 
-		let path = self.get_media_name_sha256(&key);
-		let fetch = self
-			.storage_providers()
-			.stream()
-			.filter_map(async |provider| {
-				provider
-					.get(path.as_str())
-					.await
-					.log_debug_err()
-					.ok()
-			});
-
-		pin_mut!(fetch);
-		let Some(bytes) = fetch.next().await else {
-			return Err!(Request(NotFound("Media not found.")));
-		};
+		let bytes = self.read_stored(&key).await?;
 
 		Ok(Media {
 			content: bytes.to_vec(),

@@ -221,6 +221,10 @@ pub(super) static MAPS: &[Descriptor] = &[
 		..descriptor::RANDOM_SMALL_CACHE
 	},
 	Descriptor {
+		name: "mediaid_source",
+		..descriptor::RANDOM_SMALL
+	},
+	Descriptor {
 		name: "mediaid_user",
 		..descriptor::RANDOM_SMALL
 	},
