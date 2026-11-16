@@ -14,7 +14,7 @@ use ruma::{
 	Mxc, OwnedMxcUri,
 	api::federation::authenticated_media::{FileOrLocation, get_content},
 };
-use tuwunel_core::{Err, Result, debug_warn, err, implement};
+use tuwunel_core::{Err, Result, err, implement};
 
 use super::{Animate, Dim, Metadata, remote::Fetch};
 
