@@ -89,8 +89,15 @@ pub(crate) async fn checkup_sha256_media(services: &Services) -> Result {
 	for key in media.db.get_all_media_keys().await {
 		let new_path = media.get_media_path_sha256(&key).into_os_string();
 		let old_path = media.get_media_path_b64(&key).into_os_string();
+		// a file dropped on purpose is fetched from its source, so its row stays
+		let sourced = match super::source::original_mxc(&key) {
+			| Some(mxc) => media.db.get_source(mxc).await.is_ok(),
+			| None => false,
+		};
+
 		if let Err(e) =
-			handle_media_check(&storage, config, &files, &key, &new_path, &old_path).await
+			handle_media_check(&storage, config, &files, &key, &new_path, &old_path, sourced)
+				.await
 		{
 			error!(
 				media_id = ?encode_key(&key), ?new_path, ?old_path,
@@ -114,6 +121,7 @@ async fn handle_media_check(
 	key: &[u8],
 	new_path: &OsStr,
 	old_path: &OsStr,
+	sourced: bool,
 ) -> Result {
 	use crate::media::encode_key;
 
@@ -125,7 +133,7 @@ async fn handle_media_check(
 			.is_ok_and(|md| md.is_symlink())
 	};
 
-	if config.prune_missing_media && !old_exists && !new_exists {
+	if config.prune_missing_media && !sourced && !old_exists && !new_exists {
 		error!(
 			media_id = ?encode_key(key), ?new_path, ?old_path,
 			"Media is missing at all paths. Removing from database..."
